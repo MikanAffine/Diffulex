@@ -12,7 +12,7 @@ from transformers.integrations.flex_attention import compile_friendly_flex_atten
 
 from diffulex_legacy.layers.attention.ops import (
     causal_lm_flash_decoding, diffusion_lm_flash_decoding, diffusion_lm_parallel_flash_decoding,
-    store_kvcache_unified_layout, store_kvcache_distinct_layout, load_kvcache,
+    store_kv_cache_unified_layout, store_kv_cache_distinct_layout, load_kv_cache,
     CHECK_STORING, CHECK_LOADING, CHECK_ATTENTION
 )
 from diffulex_legacy.utils.context import ContextForDiffusionLM, get_context_causal_lm, get_context_diffusion_lm
@@ -212,8 +212,8 @@ class Attention(nn.Module):
             if not (self.model_type == 'diffusion_lm' and not context.need_kv_cache_store):
                 kv_cache_dtype = _get_kv_cache_dtype(context, self.model_type)
                 k_scale, v_scale = self._update_and_compute_fp8_scales(k, v, kv_cache_dtype, k.device)
-                store_kvcache = store_kvcache_unified_layout if is_unified_layout else store_kvcache_distinct_layout
-                store_kvcache(
+                store_kv_cache = store_kv_cache_unified_layout if is_unified_layout else store_kv_cache_distinct_layout
+                store_kv_cache(
                     k, v, k_cache, v_cache, context.slot_mapping, self.model_type,
                     kv_cache_dtype=kv_cache_dtype,
                     k_scale=k_scale,
@@ -271,7 +271,7 @@ class Attention(nn.Module):
                         
                         # Load K, V in FP8 format (no dequantization)
                         fp8_dtype = spec.fp8_view_dtype
-                        k_comb, v_comb = load_kvcache(
+                        k_comb, v_comb = load_kv_cache(
                             self.k_cache, self.v_cache, context, k, v,
                             kv_cache_dtype=kv_cache_dtype,
                             k_scale=k_scale,
@@ -311,7 +311,7 @@ class Attention(nn.Module):
                         k_scale, v_scale = self._get_fp8_scales_from_max(kv_cache_dtype)
                         if k_scale is None and v_scale is None:
                             k_scale, v_scale = self._update_and_compute_fp8_scales(k, v, kv_cache_dtype, k.device)
-                        k_comb, v_comb = load_kvcache(
+                        k_comb, v_comb = load_kv_cache(
                             self.k_cache, self.v_cache, context, k, v,
                             kv_cache_dtype=kv_cache_dtype,
                             k_scale=k_scale,

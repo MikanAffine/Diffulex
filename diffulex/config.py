@@ -8,22 +8,31 @@ logger = get_logger(__name__)
 
 
 @dataclass
+class DecodingThresholds:
+    add_block_threshold: float      # whether add a new block
+    semi_complete_threshold: float  # whether unleash the decoding of the next block
+    decoding_threshold: float       # whether the token should be decoded
+
+
+@dataclass
 class Config:
     model: str
     lora_path: str = ""
     model_name: str = "dream"
-    decoding_strategy: str = "d2f" # "d2f", "fast-dllm-v2", "block-diffusion"
+    decoding_strategy: str = "d2f"  # "d2f", "fast-dllm-v2", "block_diffusion", "multi_block_diffusion"
     
     mask_token_id: int = 151666
     diffusion_block_size: int = 32
-    
-    accept_threshold: float = 0.9
-    complete_threshold: float = 0.95
-    add_new_block_threshold: float = 0.1
+    buffer_size: int = 4
+
+    decoding_thresholds: DecodingThresholds | dict | None = None
+    add_block_threshold: float | None = None
+    semi_complete_threshold: float | None = None
+    decoding_threshold: float | None = None
     
     use_lora: bool = False
     max_num_batched_tokens: int = 4096
-    max_num_seqs: int = 128
+    max_num_reqs: int = 128
     max_model_len: int = 2048
     gpu_memory_utilization: float = 0.9
     
@@ -42,8 +51,8 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
-    kvcache_block_size: int = 32
-    num_kvcache_blocks: int = -1
+    kv_cache_page_size: int = 32
+    num_kv_cache_pages: int = -1
     k_cache_hdim_split_factor_x: int = 8
     kv_cache_layout: str = "unified"  # "unified" or "distinct"
     kv_cache_dtype: str = "bf16"  # "bf16", "fp16", "fp32", "fp8_e4m3", "fp8_e5m2"
@@ -66,7 +75,7 @@ class Config:
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
-        assert self.kvcache_block_size % 16 == 0
+        assert self.kv_cache_page_size % 16 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         assert 1 <= self.data_parallel_size <= 1024
         assert isinstance(self.master_port, int) and 0 < self.master_port < 65536
@@ -90,3 +99,27 @@ class Config:
             # So we should use logical device indices (0, 1, ...) instead of physical device IDs
             self.device_ids = list(range(torch.cuda.device_count()))
             logger.info(f"Using CUDA devices: {self.device_ids}")
+
+        # Build decoding_thresholds: dict or flat keys -> DecodingThresholds
+        d = self.__dict__
+        if isinstance(self.decoding_thresholds, dict):
+            self.decoding_thresholds = DecodingThresholds(**self.decoding_thresholds)
+        elif self.decoding_thresholds is None:
+            self.decoding_thresholds = DecodingThresholds(
+                add_block_threshold=d.get('add_block_threshold', 0.1),
+                semi_complete_threshold=d.get('semi_complete_threshold', 0.9),
+                decoding_threshold=d.get('decoding_threshold', 0.9),
+            )
+
+    # Should be deprecated in the future
+    @property
+    def accept_threshold(self) -> float:
+        return self.decoding_thresholds.decoding_threshold
+
+    @property
+    def add_new_block_threshold(self) -> float:
+        return self.decoding_thresholds.add_block_threshold
+
+    @property
+    def complete_threshold(self) -> float:
+        return self.decoding_thresholds.semi_complete_threshold

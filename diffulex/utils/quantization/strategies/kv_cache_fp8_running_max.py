@@ -10,7 +10,7 @@ from diffulex.utils.quantization.kv_cache_dtype import parse_kv_cache_dtype, vie
 from diffulex.utils.quantization.registry import register_kv_cache_strategy
 
 
-class KVCacheFP8RunningMaxStrategy(KVCacheQuantizationStrategy):
+class kv_cacheFP8RunningMaxStrategy(KVCacheQuantizationStrategy):
     """FP8 KV Cache quantization strategy using running max for scale management."""
     
     def __init__(self, dtype: str = "fp8_e4m3"):
@@ -242,11 +242,11 @@ class KVCacheFP8RunningMaxStrategy(KVCacheQuantizationStrategy):
 
 
 @register_kv_cache_strategy("fp8", "fp8_e4m3", "e4m3")
-def _build_kv_cache_fp8_e4m3() -> KVCacheFP8RunningMaxStrategy:
-    return KVCacheFP8RunningMaxStrategy("fp8_e4m3")
+def _build_kv_cache_fp8_e4m3() -> kv_cacheFP8RunningMaxStrategy:
+    return kv_cacheFP8RunningMaxStrategy("fp8_e4m3")
 
 
 @register_kv_cache_strategy("fp8_e5m2", "e5m2")
-def _build_kv_cache_fp8_e5m2() -> KVCacheFP8RunningMaxStrategy:
-    return KVCacheFP8RunningMaxStrategy("fp8_e5m2")
+def _build_kv_cache_fp8_e5m2() -> kv_cacheFP8RunningMaxStrategy:
+    return kv_cacheFP8RunningMaxStrategy("fp8_e5m2")
 

@@ -4,12 +4,12 @@ from typing import List
 from dataclasses import dataclass
 
 from diffulex.attention.metadata import AttnMetaDataBase
-from diffulex.strategy.block_diffusion.engine.sequence import BDSequence
+from diffulex.strategy.block_diffusion.engine.request import BDReq
 
 
 @dataclass
 class BDAttnMetaData(AttnMetaDataBase):
-    seqs: List[BDSequence] = None
+    reqs: List[BDReq] = None
     kv_cache_layout: str = "unified"
     need_kv_cache_store: bool = True
     
@@ -31,7 +31,7 @@ def set_bd_attn_metadata(
     max_seqlen_k: int = 0,
     slot_mapping: torch.Tensor | None = None,
     context_lens: torch.Tensor | None = None,
-    block_tables: torch.Tensor | None = None,
+    page_tables: torch.Tensor | None = None,
     page_block_size: int = 32,
     diffusion_block_size: int = 32,
     decode_mode: str = "static",
@@ -48,7 +48,7 @@ def set_bd_attn_metadata(
         max_seqlen_k=max_seqlen_k,
         slot_mapping=slot_mapping,
         context_lens=context_lens,
-        block_tables=block_tables,
+        page_tables=page_tables,
         page_block_size=page_block_size,
         diffusion_block_size=diffusion_block_size,
         kv_cache_layout=kv_cache_layout,

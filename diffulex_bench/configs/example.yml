@@ -22,16 +22,17 @@ engine:
   gpu_memory_utilization: 0.7
   max_model_len: 4096
   max_num_batched_tokens: 4096
-  max_num_seqs: 128
+  max_num_reqs: 128
   
   # Engine behavior configuration
   enforce_eager: true  # Set to true for varlen mode to avoid CUDA graph capture error
   kv_cache_layout: "unified"  # Options: unified, distinct
   
   # D2F-specific configuration
-  accept_threshold: 0.9
-  complete_threshold: 0.95
-  add_new_block_threshold: 0.1
+  decoding_thresholds:
+    add_block_threshold: 0.1
+    semi_complete_threshold: 0.9
+    decoding_threshold: 0.9
   diffusion_block_size: 32
   
   # Quantization configuration

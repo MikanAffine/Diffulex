@@ -202,7 +202,7 @@ def CHECK_FLASH_ATTN_DECODE(
         is_block_attn: Whether this is block attention mode
     """
     import torch
-    from test.python.kernel.test_dllm_flash_attn_decode_kernel import naive_sdpa_with_kvcache
+    from test.python.kernel.test_dllm_flash_attn_decode_kernel import naive_sdpa_with_kv_cache
     
     # Test with memory reuse (simulate engine's behavior)
     # Run multiple times to check for memory corruption
@@ -233,8 +233,8 @@ def CHECK_FLASH_ATTN_DECODE(
     # Use the first output for comparison
     kernel_output = outputs[0]
     
-    # Compute reference output using naive_sdpa_with_kvcache (same as test file)
-    gt_output = naive_sdpa_with_kvcache(
+    # Compute reference output using naive_sdpa_with_kv_cache (same as test file)
+    gt_output = naive_sdpa_with_kv_cache(
         q, k, v, k_cache, v_cache,
         block_tables, context_lens,
         cu_seqlens_q, cu_seqlens_k,

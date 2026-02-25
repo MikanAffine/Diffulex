@@ -7,8 +7,8 @@ from multiprocessing.synchronize import Event
 import torch
 
 from diffulex.config import Config
-from diffulex.engine.sequence import SequenceBase
-from diffulex.strategy.d2f.engine.sequence import D2FSequence
+from diffulex.engine.request import DllmReq
+from diffulex.strategy.d2f.engine.request import D2FReq
 from diffulex.attention.metadata import set_fetch_fn_for_attn_metadata, set_warming_up, reset_warming_up
 from diffulex.engine.model_runner import AutoModelRunner, ModelRunnerBase
 from diffulex.strategy.d2f.attention.metadata import fetch_d2f_attn_metadata, set_d2f_attn_metadata, reset_d2f_attn_metadata
@@ -46,7 +46,7 @@ class D2FModelRunner(ModelRunnerBase):
         
         return decode_mode
 
-    def prepare_prefill(self, seqs: list[D2FSequence]):
+    def prepare_prefill(self, reqs: list[D2FReq]):
         input_ids: list[int] = []
         positions: list[int] = []
         cu_seqlens_q = [0]
@@ -58,12 +58,12 @@ class D2FModelRunner(ModelRunnerBase):
         context_lens: list[int] = []
         seq_lens: list[int] = []
 
-        for seq in seqs:
-            seq.next_diffusion_step(is_prefill=True)
+        for req in reqs:
+            req.next_diffusion_step(is_prefill=True)
 
-            total_seqlen = len(seq)
-            input_ids.extend(seq[seq.cached_num_tokens:])
-            positions.extend(range(seq.cached_num_tokens, total_seqlen))
+            total_seqlen = len(req)
+            input_ids.extend(req[req.cached_num_tokens:])
+            positions.extend(range(req.cached_num_tokens, total_seqlen))
             seq_lens.append(total_seqlen)
             context_lens.append(0)
             assert len(input_ids) == len(positions), (
@@ -73,7 +73,7 @@ class D2FModelRunner(ModelRunnerBase):
                 )
             )
 
-            seqlen_q = total_seqlen - seq.cached_num_tokens
+            seqlen_q = total_seqlen - req.cached_num_tokens
             seqlen_k = total_seqlen
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
@@ -81,21 +81,21 @@ class D2FModelRunner(ModelRunnerBase):
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
 
-            if not seq.block_table:
+            if not req.block_table:
                 continue
-            for i in range(0, seq.num_prompt_blocks):
-                if seq.block_cache_missed[i]:
-                    start = seq.block_table[i] * self.block_size
-                    if i != seq.num_prompt_blocks - 1:
-                        end = start + self.block_size
+            for i in range(0, req.num_prompt_blocks):
+                if req.page_cache_missed[i]:
+                    start = req.block_table[i] * self.page_size
+                    if i != req.num_prompt_blocks - 1:
+                        end = start + self.page_size
                     else:
-                        end = start + seq.last_block_prompt_num_tokens
+                        end = start + req.last_block_prompt_num_tokens
                     slot_mapping.extend(range(start, end))
                 else:
-                    slot_mapping.extend([-1] * self.block_size)
-            slot_mapping.extend([-1] * seq.diffusion_block_size)
+                    slot_mapping.extend([-1] * self.page_size)
+            slot_mapping.extend([-1] * req.diffusion_block_size)
 
-        block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_page_tables(reqs)
 
         input_ids_tensor = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions_tensor = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -128,7 +128,7 @@ class D2FModelRunner(ModelRunnerBase):
             slot_mapping=slot_mapping_tensor,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
-            seqs=seqs,
+            reqs=reqs,
             kv_cache_layout=self.config.kv_cache_layout,
             seq_lens=seq_lens,
             seq_lens_ts=seq_lens_ts,
@@ -138,7 +138,7 @@ class D2FModelRunner(ModelRunnerBase):
         )
         return input_ids_tensor, positions_tensor
 
-    def prepare_decode(self, seqs: list[D2FSequence]):
+    def prepare_decode(self, reqs: list[D2FReq]):
         input_ids: list[int] = []
         positions: list[int] = []
         cu_seqlens_q = [0]
@@ -146,51 +146,51 @@ class D2FModelRunner(ModelRunnerBase):
         slot_mapping: list[int] = []
         context_lens: list[int] = []
         seq_lens: list[int] = []
-        seq_id_to_queue_id: dict[int, int] = {}
+        req_id_to_queue_id: dict[int, int] = {}
         need_kv_cache_store = False
         max_seqlen_q = 0
         max_seqlen_k = 0
 
-        for seq_idx_in_queue, seq in enumerate(seqs):
-            seq_id = seq.seq_id
-            seq_id_to_queue_id[seq_id] = seq_idx_in_queue
-            seq.next_diffusion_step()
-            cur_input_ids, cur_positions, cur_context_len = seq.diffusion_decoding_inputs()
+        for req_idx_in_queue, req in enumerate(reqs):
+            req_id = req.req_id
+            req_id_to_queue_id[req_id] = req_idx_in_queue
+            req.next_diffusion_step()
+            cur_input_ids, cur_positions, cur_context_len = req.diffusion_decoding_inputs()
 
             seq_lens.append(len(cur_input_ids))
             input_ids.extend(cur_input_ids)
             positions.extend(cur_positions)
             context_lens.append(cur_context_len)
 
-            total_seqlen = len(seq)
-            seqlen_q = total_seqlen - seq.cached_num_tokens
+            total_seqlen = len(req)
+            seqlen_q = total_seqlen - req.cached_num_tokens
             seqlen_k = total_seqlen
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
 
-            mem_block_to_diffusion_blocks_map = seq.mem_block_to_diffusion_blocks_map
-            context_len = context_lens[seq_id_to_queue_id[seq_id]]
-            for mem_block_idx in range(0, seq.num_blocks):
-                start_idx = mem_block_idx * seq.block_size
-                end_idx = start_idx + seq.block_size
+            mem_block_to_diffusion_blocks_map = req.mem_block_to_diffusion_blocks_map
+            context_len = context_lens[req_id_to_queue_id[req_id]]
+            for mem_block_idx in range(0, req.num_pages):
+                start_idx = mem_block_idx * req.page_size
+                end_idx = start_idx + req.page_size
                 cur_map = mem_block_to_diffusion_blocks_map[mem_block_idx]
                 is_last_block = False
                 meet_active_block = False
                 while start_idx < end_idx and not is_last_block and not meet_active_block:
-                    local_start_idx = lambda: start_idx % seq.block_size
-                    diffusion_block = seq.diffusion_blocks[cur_map[local_start_idx()]]
+                    local_start_idx = lambda: start_idx % req.page_size
+                    diffusion_block = req.diffusion_blocks[cur_map[local_start_idx()]]
                     if diffusion_block.block_id == 0 and diffusion_block.cursor != start_idx:
                         diffusion_block.cursor = start_idx
-                    if cur_map[local_start_idx()] == seq.num_diffusion_blocks - 1:
+                    if cur_map[local_start_idx()] == req.num_diffusion_blocks - 1:
                         is_last_block = True
 
                     def get_step(diff_blk, begin_idx):
                         remaining = diff_blk.remaining_length(begin_idx)
-                        if remaining + local_start_idx() <= seq.block_size:
+                        if remaining + local_start_idx() <= req.page_size:
                             return remaining
-                        return seq.block_size - local_start_idx()
+                        return req.page_size - local_start_idx()
 
                     if diffusion_block.is_in_cache:
                         step = get_step(diffusion_block, start_idx)
@@ -206,20 +206,20 @@ class D2FModelRunner(ModelRunnerBase):
                         # We must have a KV-cache block allocated for this mem_block_idx.
                         # If not, this is almost always due to insufficient KV cache blocks
                         # (e.g. higher model/weight memory footprint leaves too few blocks).
-                        if mem_block_idx >= len(seq.block_table):
+                        if mem_block_idx >= len(req.block_table):
                             raise RuntimeError(
                                 "KV cache block allocation is insufficient during decode: "
                                 f"mem_block_idx={mem_block_idx} requires block_table length >= {mem_block_idx + 1}, "
-                                f"but got len(block_table)={len(seq.block_table)} (seq.num_blocks={seq.num_blocks}). "
+                                f"but got len(block_table)={len(req.block_table)} (req.num_pages={req.num_pages}). "
                                 "This usually means GPU memory utilization is too low to allocate enough KV cache "
-                                f"blocks for this run (num_kvcache_blocks={getattr(self.config, 'num_kvcache_blocks', None)}, "
+                                f"pages for this run (num_kv_cache_pages={getattr(self.config, 'num_kv_cache_pages', None)}, "
                                 f"gpu_memory_utilization={getattr(self.config, 'gpu_memory_utilization', None)}). "
-                                "Try increasing gpu_memory_utilization, reducing max_model_len/max_tokens/max_num_seqs, "
+                                "Try increasing gpu_memory_utilization, reducing max_model_len/max_tokens/max_num_reqs, "
                                 "or using a lower-memory weight quantization (e.g. int4)."
                             )
                         mem_block_start = (
-                            seq.block_table[mem_block_idx] * self.block_size
-                            + context_len % seq.block_size
+                            req.block_table[mem_block_idx] * self.page_size
+                            + context_len % req.page_size
                         )
                         context_len += step
                         slot_mapping.extend(
@@ -233,11 +233,11 @@ class D2FModelRunner(ModelRunnerBase):
                         meet_active_block = True
 
                 if meet_active_block:
-                    active = seq.active_blocks
+                    active = req.active_blocks
                     first_active_idx = next((i for i, v in enumerate(active) if v), None)
                     if first_active_idx is not None:
                         num_blocks_to_pad = len(active) - first_active_idx
-                        slot_mapping.extend([-1] * (num_blocks_to_pad * seq.diffusion_block_size))
+                        slot_mapping.extend([-1] * (num_blocks_to_pad * req.diffusion_block_size))
                     break
             assert len(input_ids) == len(positions), (
                 "Input IDs length {len_ids} does not match positions length {len_pos}".format(
@@ -259,10 +259,10 @@ class D2FModelRunner(ModelRunnerBase):
         cu_seqlens_k_tensor = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping_tensor = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens_tensor = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_page_tables(reqs)
         # NOTE:
         # - d2f decode supports "varlen" and "static" modes (see config.decode_mode).
-        # - For FP8 KV, the (varlen/distinct-layout) path uses `load_kvcache` which is expected to
+        # - For FP8 KV, the (varlen/distinct-layout) path uses `load_kv_cache` which is expected to
         #   handle FP8 dequantization / scale application inside the fused operator (no Python-level dequant).
         # - Performance can still differ between modes/kernels; when FP8 KV is enabled, prefer the
         #   best-supported kernel path on your stack (often "static"/unified-layout) and validate with profiling.
@@ -277,7 +277,7 @@ class D2FModelRunner(ModelRunnerBase):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             block_tables=block_tables,
-            seqs=seqs,
+            reqs=reqs,
             seq_lens=seq_lens,
             seq_lens_ts=seq_lens_ts,
             kv_cache_layout=self.config.kv_cache_layout,
@@ -332,9 +332,9 @@ class D2FModelRunner(ModelRunnerBase):
         graph.replay()
         return self.model.compute_logits(graph_vars["outputs"][:num_tokens])
 
-    def run(self, seqs: list[SequenceBase], is_prefill: bool) -> list[int]:
-        input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+    def run(self, reqs: list[DllmReq], is_prefill: bool) -> list[int]:
+        input_ids, positions = self.prepare_prefill(reqs) if is_prefill else self.prepare_decode(reqs)
+        temperatures = self.prepare_sample(reqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
         sample_output = self.sampler(logits, temperatures) if self.rank == 0 else None
         reset_d2f_attn_metadata()
@@ -364,7 +364,7 @@ class D2FModelRunner(ModelRunnerBase):
         config = self.config
         hf_config = config.hf_config
         diffusion_block_size = int(self.diffusion_block_size)
-        max_num_seqs = int(self.config.max_num_seqs)
+        max_num_seqs = int(self.config.max_num_reqs)
         # Graph path is only used when num_tokens <= 512.
         #
         # IMPORTANT:
@@ -374,7 +374,7 @@ class D2FModelRunner(ModelRunnerBase):
         # `max_num_seqs_for_graph` (padding unused seqs to 0-length via cu_seqlens).
         max_num_seqs_for_graph = max(1, min(max_num_seqs, 512))
         max_num_tokens = 512
-        max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
+        max_num_blocks = (config.max_model_len + self.page_size - 1) // self.page_size
 
         # Allocate graph buffers on the same device/dtype as the model.
         try:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from diffulex.config import Config
 from diffulex.sampling_params import SamplingParams
-from diffulex.engine.sequence import AutoSequence, SequenceBase
+from diffulex.engine.request import AutoReq, DllmReq
 
 
 class BDDiffusionBlockStatus(Enum):
@@ -27,13 +27,13 @@ class BDDiffusionBlock:
     size: int = 32
     is_prompt: bool = False
     
-    seq: "BDSequence" | None = None
+    req: "BDReq" | None = None
 
     def __post_init__(self) -> None:
         self.global_end_id = self.global_start_id + self.size
 
     def __getitem__(self, key: int) -> int:
-        return self.seq[self.global_start_id + key]  # type: ignore[index]
+        return self.req[self.global_start_id + key]  # type: ignore[index]
 
     def __len__(self) -> int:
         return self.size
@@ -47,16 +47,16 @@ class BDDiffusionBlock:
             self.status = BDDiffusionBlockStatus.IN_CACHE
             
     def modify_token(self, local_token_id: int, modified_to: int) -> None:
-        if self.seq is None:
-            raise RuntimeError("Diffusion block is not attached to a sequence.")
+        if self.req is None:
+            raise RuntimeError("Diffusion block is not attached to a req.")
         target_id = local_token_id + self.global_start_id
-        assert self.seq.token_ids[target_id] == self.mask_token_id
-        self.seq.token_ids[target_id] = modified_to.item()  # type: ignore[assignment]
-        self.seq.new_tokens += 1
+        assert self.req.token_ids[target_id] == self.mask_token_id
+        self.req.token_ids[target_id] = int(modified_to)  # modified_to may be tensor or int
+        self.req.new_tokens += 1
     
     @property
     def token_ids(self) -> list[int]:
-        return self.seq.token_ids[self.global_start_id: self.global_end_id]
+        return self.req.token_ids[self.global_start_id: self.global_end_id]
     
     @property
     def has_mask_token(self) -> bool:
@@ -96,15 +96,15 @@ class BDDiffusionBlock:
     
     @property
     def global_mask_token_ids(self) -> list[int]:
-        if self.seq is None:
+        if self.req is None:
             return []
-        offset = self.global_start_id - self.size * sum(block.is_to_cache for block in self.seq.diffusion_blocks)
+        offset = self.global_start_id - self.size * sum(block.is_to_cache for block in self.req.diffusion_blocks)
         return [mask_id + offset for mask_id in self.local_mask_token_ids]
     
 
-@AutoSequence.register("block_diffusion", is_default=True)
-class BDSequence(SequenceBase):
-    """Sequence implementation tailored for diffusion-based decoding."""
+@AutoReq.register("block_diffusion", is_default=True)
+class BDReq(DllmReq):
+    """Req implementation tailored for diffusion-based decoding."""
 
     def __init__(
         self,
@@ -114,7 +114,7 @@ class BDSequence(SequenceBase):
     ):
         super().__init__(token_ids, sampling_params)
         if config is None:
-            raise ValueError("BDSequence requires a Config instance.")
+            raise ValueError("BDReq requires a Config instance.")
         
         self.config = config
         self.diffusion_blocks: list[BDDiffusionBlock] = []
@@ -136,11 +136,11 @@ class BDSequence(SequenceBase):
     
     @property
     def num_prefix_blocks(self) -> int:
-        return (self.prefix_len + self.block_size - 1) // self.block_size
+        return (self.prefix_len + self.page_size - 1) // self.page_size
     
     @property
     def prefix_last_block_num_tokens(self) -> int:
-        return self.prefix_len - (self.num_prefix_blocks - 1) * self.block_size
+        return self.prefix_len - (self.num_prefix_blocks - 1) * self.page_size
     
     @property
     def active_block_token_ids(self) -> list[int]:
@@ -148,7 +148,7 @@ class BDSequence(SequenceBase):
     
     @property
     def num_page_blocks_in_active_diffusion_block(self) -> int:
-        return self.diffusion_block_size // self.block_size
+        return self.diffusion_block_size // self.page_size
     
     @property
     def cached_num_tokens(self) -> int:
@@ -232,7 +232,7 @@ class BDSequence(SequenceBase):
                 size=block_size,
                 mask_token_id=self.mask_token_id,
                 is_prompt=(block_id <= num_prefix_blocks),
-                seq=self,
+                req=self,
             )
             self.diffusion_blocks.append(block)
             current_pos += block_size
@@ -250,7 +250,7 @@ class BDSequence(SequenceBase):
                     size=self.diffusion_block_size,
                     mask_token_id=self.mask_token_id,
                     is_prompt=False,
-                    seq=self,
+                    req=self,
                 )
             )
         self.n_steps += 1

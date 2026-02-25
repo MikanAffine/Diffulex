@@ -4,7 +4,7 @@ from typing import List
 from dataclasses import dataclass
 
 from mimic_data.mimic_slot_mapping import slot_mapping
-from diffulex_legacy.layers.attention.ops import store_kvcache_unified_layout, load_kvcache, CHECK_LOADING
+from diffulex_legacy.layers.attention.ops import store_kv_cache_unified_layout, load_kv_cache, CHECK_LOADING
 
 @dataclass
 class MimicSequenceForDiffusionLM:
@@ -60,7 +60,7 @@ if __name__ == "__main__":
         cu_seqlens_k=cu_seqlens_k
     )
     
-    store_kvcache_unified_layout(k_new, v_new, k_cache, v_cache, slot_mapping, model_type='diffusion_lm')
+    store_kv_cache_unified_layout(k_new, v_new, k_cache, v_cache, slot_mapping, model_type='diffusion_lm')
 
-    k_comb, v_comb = load_kvcache(k_cache, v_cache, context, k_new, v_new)
+    k_comb, v_comb = load_kv_cache(k_cache, v_cache, context, k_new, v_new)
     CHECK_LOADING(k_comb, v_comb, k_new, v_new, k_cache, v_cache, context)

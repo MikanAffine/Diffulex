@@ -38,15 +38,15 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
-    kvcache_block_size: int = 256
-    num_kvcache_blocks: int = -1
+    kv_cache_block_size: int = 256
+    num_kv_cache_blocks: int = -1
     k_cache_hdim_split_factor_x: int = 8
     kv_cache_layout: str = "unified"  # "unified" or "distinct"
     kv_cache_dtype: str = "bf16"  # "bf16", "fp16", "fp32", "fp8", "fp8_e4m3", "fp8_e5m2"
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
-        assert self.kvcache_block_size % 16 == 0
+        assert self.kv_cache_block_size % 16 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         assert 1 <= self.data_parallel_size <= 1024
         assert isinstance(self.master_port, int) and 0 < self.master_port < 65536

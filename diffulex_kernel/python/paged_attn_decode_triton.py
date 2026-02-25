@@ -1,3 +1,7 @@
+# Triton JIT kernels: Pyright may falsely report "unreachable" for code inside @triton.jit
+# decorated functions (the body is traced/compiled, not run as normal Python).
+# pyright: reportUnreachable=false
+
 import torch
 import triton
 import triton.language as tl
@@ -534,7 +538,7 @@ def paged_attn_decode_unified_triton(
     assert num_heads % num_kv_heads == 0
     num_groups = num_heads // num_kv_heads
 
-    page_size = int(attn_metadata.page_block_size)
+    page_size = int(attn_metadata.page_size)
 
     # Heuristics: BLOCK_M = 64 (supports diffusion_block_size=32/64), BLOCK_N = page_size/new-tile
     BLOCK_M = 64

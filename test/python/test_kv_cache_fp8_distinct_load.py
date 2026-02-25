@@ -4,7 +4,7 @@ import torch
 from types import SimpleNamespace
 
 from diffulex.utils.quantization.factory import QuantizationStrategyFactory
-from diffulex_kernel import store_kvcache_distinct_layout, load_kvcache
+from diffulex_kernel import store_kv_cache_distinct_layout, load_kv_cache
 
 
 def _has_fp8() -> bool:
@@ -97,7 +97,7 @@ def test_fp8_kv_cache_distinct_store_and_load():
     )
 
     # Store context into cache.
-    store_kvcache_distinct_layout(k_all, v_all, k_cache_u8, v_cache_u8, slot_mapping_ts, md)
+    store_kv_cache_distinct_layout(k_all, v_all, k_cache_u8, v_cache_u8, slot_mapping_ts, md)
 
     # Build k_new/v_new (only active tokens, concatenated over sequences).
     k_new_list = []
@@ -113,7 +113,7 @@ def test_fp8_kv_cache_distinct_store_and_load():
     v_new = torch.cat(v_new_list, dim=0).contiguous()
 
     # Load (fused dequant + gather) and append new tokens.
-    k_out, v_out = load_kvcache(k_cache_u8, v_cache_u8, md, k_new, v_new)
+    k_out, v_out = load_kv_cache(k_cache_u8, v_cache_u8, md, k_new, v_new)
 
     # Split outputs per sequence to check ctx/new portions.
     out_splits_k = torch.split(k_out, total_lens.tolist(), dim=0)

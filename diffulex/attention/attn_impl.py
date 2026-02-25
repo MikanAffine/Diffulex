@@ -3,8 +3,8 @@ import torch.nn as nn
 from einops import rearrange
 
 from diffulex_kernel import (
-    store_kvcache_distinct_layout, 
-    store_kvcache_unified_layout, 
+    store_kv_cache_distinct_layout, 
+    store_kv_cache_unified_layout, 
     dllm_flash_attn_decode, 
     dllm_flash_attn_prefill
 )
@@ -71,12 +71,12 @@ class Attention(nn.Module):
                             attn_metadata, k_scale=self.k_scale, v_scale=self.v_scale
                         )
                 
-                store_kvcache = store_kvcache_unified_layout if is_unified_layout else store_kvcache_distinct_layout
-                store_kvcache(k, v, k_cache, v_cache, attn_metadata.slot_mapping, attn_metadata)
+                store_kv_cache = store_kv_cache_unified_layout if is_unified_layout else store_kv_cache_distinct_layout
+                store_kv_cache(k, v, k_cache, v_cache, attn_metadata.slot_mapping, attn_metadata)
 
         # Prefill / Decode logic
         if attn_metadata.is_prefill:
-            if attn_metadata.block_tables is not None:
+            if attn_metadata.page_tables is not None:
                 # TODO: Implement Prefix Caching
                 pass
             o = dllm_flash_attn_prefill(q, k, v, self.scale, attn_metadata)
@@ -85,25 +85,25 @@ class Attention(nn.Module):
                 from diffulex.utils.quantization.context import get_kv_cache_strategy
                 strategy = get_kv_cache_strategy()
                 if strategy is not None:
-                    # e.g. FP8: pass scales to metadata for kernel / load_kvcache to handle
+                    # e.g. FP8: pass scales to metadata for kernel / load_kv_cacheeeeee to handle
                     strategy.maybe_set_attn_metadata_scales(
                         attn_metadata, k_scale=self.k_scale, v_scale=self.v_scale
                     )
                 
                 o = dllm_flash_attn_decode(q, k, v, k_cache, v_cache, self.scale, attn_metadata)
             else:
-                # Distinct layout: use varlen mode with load_kvcache
-                from diffulex_kernel import load_kvcache
+                # Distinct layout: use varlen mode with load_kv_cachee
+                from diffulex_kernel import load_kv_cache
                 from diffulex.utils.quantization.context import get_kv_cache_strategy
                 strategy = get_kv_cache_strategy()
                 if strategy is not None:
-                    # e.g. FP8: pass scales to metadata for load_kvcache to handle
+                    # e.g. FP8: pass scales to metadata for load_kv_cache to handle
                     strategy.maybe_set_attn_metadata_scales(
                         attn_metadata, k_scale=self.k_scale, v_scale=self.v_scale
                     )
                 
                 # Distinct layout uses varlen mode
-                k_comb, v_comb = load_kvcache(k_cache, v_cache, attn_metadata, k, v)
+                k_comb, v_comb = load_kv_cache(k_cache, v_cache, attn_metadata, k, v)
                 from flash_attn import flash_attn_varlen_func
                 o = flash_attn_varlen_func(
                     q, k_comb, v_comb,

@@ -10,7 +10,7 @@ from einops import rearrange
 from diffulex_kernel.python.dllm_flash_attn_kernels import dllm_flash_attn_decode_kernel
 
 
-def naive_sdpa_with_kvcache(
+def naive_sdpa_with_kv_cache(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -206,7 +206,7 @@ def run_dllm_flash_attn_decode(
     )
     
     # Compute reference output
-    ref_output = naive_sdpa_with_kvcache(
+    ref_output = naive_sdpa_with_kv_cache(
         q, k, v, k_cache, v_cache,
         block_tables, context_lens,
         cu_seqlens_q, cu_seqlens_k,

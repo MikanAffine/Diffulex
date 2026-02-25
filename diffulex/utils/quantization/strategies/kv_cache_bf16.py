@@ -8,7 +8,7 @@ from diffulex.utils.quantization.strategy import KVCacheQuantizationStrategy
 from diffulex.utils.quantization.registry import register_kv_cache_strategy
 
 
-class KVCacheBF16Strategy(KVCacheQuantizationStrategy):
+class kv_cacheBF16Strategy(KVCacheQuantizationStrategy):
     """BF16 KV Cache strategy (no quantization, just storage format)."""
     
     @property
@@ -56,6 +56,6 @@ class KVCacheBF16Strategy(KVCacheQuantizationStrategy):
 # Keeping them registered avoids breaking older configs while we add
 # true fp16/fp32 KV-cache kernels in the future.
 @register_kv_cache_strategy("bf16", "bfloat16", "fp16", "float16", "fp32", "float32")
-def _build_kv_cache_bf16() -> KVCacheBF16Strategy:
-    return KVCacheBF16Strategy()
+def _build_kv_cache_bf16() -> kv_cacheBF16Strategy:
+    return kv_cacheBF16Strategy()
 

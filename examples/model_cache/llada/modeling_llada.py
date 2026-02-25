@@ -1169,7 +1169,7 @@ class LLaDAModel(nn.Module):
         attention_bias: Optional[torch.Tensor] = None,
         past_key_values: Optional[Sequence[Tuple[torch.Tensor, torch.Tensor]]] = None,
         use_cache: bool = False,
-        update_kvcache: bool = False,
+        update_kv_cache: bool = False,
         last_logits_only: bool = False,
         output_hidden_states: Optional[bool] = None,
     ) -> LLaDAOutput:
@@ -1207,7 +1207,7 @@ class LLaDAModel(nn.Module):
         # print(input_ids.dtype)
         assert not self.config.alibi, "Alibi length extrapolation is not supported for MDM."
         assert self.config.rope, "Rope must be used in Llama-Encoder for MDM."
-        # assert (past_key_values is None and not use_cache), "The kvcache is not suppotred for MDM."
+        # assert (past_key_values is None and not use_cache), "The kv_cache is not suppotred for MDM."
 
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
 
@@ -1320,8 +1320,8 @@ class LLaDAModel(nn.Module):
                     # shape: (batch_size, seq_len, d_model)
                     x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache)
                 if attn_key_values is not None:
-                    if update_kvcache:
-                        cache = (cache[0][:,:,:update_kvcache],cache[1][:,:,:update_kvcache,:])
+                    if update_kv_cache:
+                        cache = (cache[0][:,:,:update_kv_cache],cache[1][:,:,:update_kv_cache,:])
                         # print("True")
                         attn_key_values.append(cache)
         else:
@@ -1363,7 +1363,7 @@ class LLaDAModel(nn.Module):
             logits = self.transformer.ff_out(x)  # type: ignore
         if self.config.scale_logits:
             logits.mul_(1 / math.sqrt(self.config.d_model))
-        if use_cache == True and update_kvcache == False:
+        if use_cache == True and update_kv_cache == False:
             attn_key_values=past_key_values
         return LLaDAOutput(logits=logits, attn_key_values=attn_key_values, hidden_states=tuple(all_hidden_states) if output_hidden_states else None)  # type: ignore[arg-type]
 
@@ -1410,7 +1410,7 @@ class LLaDAModelLM(PreTrainedModel):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        update_kvcache: Optional[bool] = False,
+        update_kv_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1432,7 +1432,7 @@ class LLaDAModelLM(PreTrainedModel):
             attention_bias=attention_bias,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            update_kvcache=update_kvcache,
+            update_kv_cache=update_kv_cache,
             output_hidden_states=output_hidden_states,
         )
 

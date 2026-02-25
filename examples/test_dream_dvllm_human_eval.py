@@ -55,7 +55,7 @@ if __name__ == "__main__":
         accept_threshold=0.95,
         complete_threshold=0.9,
         add_new_block_threshold=0.1,
-        kvcache_block_size=32,
+        kv_cache_block_size=32,
         kv_cache_layout="unified"
     )
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)

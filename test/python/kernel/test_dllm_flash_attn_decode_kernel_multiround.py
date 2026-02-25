@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from diffulex_kernel.python.dllm_flash_attn_kernels import dllm_flash_attn_decode_kernel
-from test.python.kernel.test_dllm_flash_attn_decode_kernel import naive_sdpa_with_kvcache
+from test.python.kernel.test_dllm_flash_attn_decode_kernel import naive_sdpa_with_kv_cache
 
 
 def test_decode_multiround_context_len():
@@ -247,7 +247,7 @@ def test_decode_multiround_context_len():
             torch.cuda.synchronize()
             
             scale = 1.0 / (base_params["head_dim"] ** 0.5)
-            ref_output = naive_sdpa_with_kvcache(
+            ref_output = naive_sdpa_with_kv_cache(
                 q, k, v, k_cache, v_cache,
                 block_tables, context_lens_tensor,
                 cu_seqlens_q, cu_seqlens_k,
@@ -524,7 +524,7 @@ def test_decode_engine_like_scenarios():
             
             # Verify correctness against reference
             scale = 1.0 / (base_params["head_dim"] ** 0.5)
-            ref_output = naive_sdpa_with_kvcache(
+            ref_output = naive_sdpa_with_kv_cache(
                 q, k, v, k_cache, v_cache,
                 block_tables, context_lens_tensor,
                 cu_seqlens_q, cu_seqlens_k,

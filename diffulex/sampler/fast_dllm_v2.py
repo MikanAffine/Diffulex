@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from diffulex.sampler.auto_sampler import AutoSampler
 from diffulex.sampler.base import SamplerShiftLogits, SampleOutputBase
-from diffulex.engine.sequence import SequenceBase
+from diffulex.engine.request import DllmReq
 
 
 @dataclass
@@ -14,7 +14,7 @@ class FastdLLMV2SampleOutputForDiffusionLM(SampleOutputBase):
 
 @AutoSampler.register("fast_dllm_v2")
 class FastdLLMV2SamplerForDiffusionLM(SamplerShiftLogits):
-    def forward(self, seqs: list[SequenceBase], logits: torch.Tensor, temperatures: torch.Tensor,
+    def forward(self, seqs: list[DllmReq], logits: torch.Tensor, temperatures: torch.Tensor,
                 top_p=None, top_k=None, margin_confidence=False, neg_entropy=False, threshold=0.95):
         attn_metadata = self.fetch_attn_metadata()
         split_logits = torch.split(
@@ -69,7 +69,7 @@ class FastdLLMV2SamplerForDiffusionLM(SamplerShiftLogits):
                 accepted_ids_sub_map[str(block_id)] = accepted_ids_list
                 sampled_tokens_sub_map[str(block_id)] = sampled_tokens.to(device="cpu").tolist()
             
-            seq_idx = str(seq.seq_id)
+            seq_idx = str(seq.req_id)
             true_local_ids_map[seq_idx] = true_local_ids_sub_map
             accepted_ids_map[seq_idx] = accepted_ids_sub_map
             sampled_tokens_map[seq_idx] = sampled_tokens_sub_map

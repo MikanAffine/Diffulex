@@ -50,7 +50,7 @@ class ModelRunnerBase(ABC):
         self.config = config
         self.model_type = config.model_type
         hf_config = config.hf_config
-        self.block_size = config.kvcache_block_size
+        self.block_size = config.kv_cache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
         self.rank = rank
@@ -222,12 +222,12 @@ class ModelRunnerForCausalLM(ModelRunnerBase):
         
         block_bytes = (2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * 
                        head_dim * itemsize)
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - 
+        config.num_kv_cache_blocks = int(total * config.gpu_memory_utilization - 
                                         used - peak + current) // block_bytes
-        assert config.num_kvcache_blocks > 0
+        assert config.num_kv_cache_blocks > 0
         # [kv_separated, layer_id, block_id, block_size(segmented seq_len), head, head_dim]
         self.kv_cache = torch.zeros(
-            2, hf_config.num_hidden_layers, config.num_kvcache_blocks, 
+            2, hf_config.num_hidden_layers, config.num_kv_cache_blocks, 
             self.block_size, num_kv_heads, head_dim, dtype=storage_dtype)
         layer_id = 0
         for module in self.model.modules():
@@ -417,23 +417,23 @@ class ModelRunnerForDiffusionLM(ModelRunnerBase):
             raise AttributeError(f"Cannot determine head_dim from config: {type(hf_config)}")
         
         block_bytes = (2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * itemsize)
-        get_num_kvcache_blocks = lambda gpu_memory_utilization: int(total * gpu_memory_utilization -  # noqa: E731
+        get_num_kv_cache_blocks = lambda gpu_memory_utilization: int(total * gpu_memory_utilization -  # noqa: E731
                                                                     used - peak + current) // block_bytes
         try:
-            num_kvcache_blocks = get_num_kvcache_blocks(config.gpu_memory_utilization)
-            assert num_kvcache_blocks > 0
+            num_kv_cache_blocks = get_num_kv_cache_blocks(config.gpu_memory_utilization)
+            assert num_kv_cache_blocks > 0
         except:  # noqa: E722
             gpu_memory_utilization = config.gpu_memory_utilization
-            while num_kvcache_blocks <= 200: 
+            while num_kv_cache_blocks <= 200: 
                 print(f"Warning: GPU memory utilization {gpu_memory_utilization} is too low to allocate kv cache. "
                     f"Automatically adding 0.05, which is {gpu_memory_utilization + 0.05:.2f} now.")
                 gpu_memory_utilization += 0.05
-                num_kvcache_blocks = get_num_kvcache_blocks(gpu_memory_utilization)
+                num_kv_cache_blocks = get_num_kv_cache_blocks(gpu_memory_utilization)
             print(f"Set gpu_memory_utilization to {gpu_memory_utilization:.2f} to allocate kv cache.")
             config.gpu_memory_utilization = gpu_memory_utilization
             
-        config.num_kvcache_blocks = num_kvcache_blocks
-        print(f"Allocated {config.num_kvcache_blocks} blocks of size {self.block_size} for kv cache on rank {self.rank}.")
+        config.num_kv_cache_blocks = num_kv_cache_blocks
+        print(f"Allocated {config.num_kv_cache_blocks} blocks of size {self.block_size} for kv cache on rank {self.rank}.")
 
         if config.kv_cache_layout == "distinct":
             # k_cache: [layer_id, block_id, head, head_dim // x, block_size(segmented seq_len), x]
@@ -441,11 +441,11 @@ class ModelRunnerForDiffusionLM(ModelRunnerBase):
             x = config.k_cache_hdim_split_factor_x
             
             self.k_cache = torch.zeros(
-                hf_config.num_hidden_layers, config.num_kvcache_blocks, 
+                hf_config.num_hidden_layers, config.num_kv_cache_blocks, 
                 num_kv_heads, head_dim // x, self.block_size, x, dtype=storage_dtype
             )
             self.v_cache = torch.zeros(
-                hf_config.num_hidden_layers, config.num_kvcache_blocks, 
+                hf_config.num_hidden_layers, config.num_kv_cache_blocks, 
                 num_kv_heads, head_dim, self.block_size, dtype=storage_dtype
             )
             layer_id = 0
@@ -457,7 +457,7 @@ class ModelRunnerForDiffusionLM(ModelRunnerBase):
         elif config.kv_cache_layout == "unified":
             # [kv_separated, layer_id, block_id, block_size(segmented seq_len), head, head_dim]
             self.kv_cache = torch.zeros(
-                2, hf_config.num_hidden_layers, config.num_kvcache_blocks, 
+                2, hf_config.num_hidden_layers, config.num_kv_cache_blocks, 
                 self.block_size, num_kv_heads, head_dim, dtype=storage_dtype)
             layer_id = 0
             for module in self.model.modules():

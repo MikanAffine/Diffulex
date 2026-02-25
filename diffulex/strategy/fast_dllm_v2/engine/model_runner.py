@@ -8,15 +8,15 @@ import torch
 from tqdm import tqdm
 
 from diffulex.config import Config
-from diffulex.engine.sequence import SequenceBase
-from diffulex.strategy.fast_dllm_v2.engine.sequence import FDV2Sequence
+from diffulex.engine.request import DllmReq
+from diffulex.strategy.fast_dllm_v2.engine.request import FDV2Req
 from diffulex.attention.metadata import set_fetch_fn_for_attn_metadata, set_warming_up, reset_warming_up
 from diffulex.engine.model_runner import AutoModelRunner, ModelRunnerBase
 from diffulex.strategy.fast_dllm_v2.attention.metadata import fetch_fdv2_attn_metadata, set_fdv2_attn_metadata, reset_fdv2_attn_metadata
 
 
 @AutoModelRunner.register("fast_dllm_v2", is_default=True)
-class FastDLLMV2ModelRunner(ModelRunnerBase):
+class FDV2ModelRunner(ModelRunnerBase):
     """Reference implementation of Block Diffusion decoding strategy."""
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         set_fetch_fn_for_attn_metadata(fetch_fdv2_attn_metadata)
@@ -25,7 +25,7 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
         
         super().__init__(config, rank, event)
 
-    def prepare_prefill(self, seqs: list[FDV2Sequence]):
+    def prepare_prefill(self, reqs: list[FDV2Req]):
         input_ids: list[int] = []
         positions: list[int] = []
         cu_seqlens_q = [0]
@@ -36,15 +36,15 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
         block_tables = None
         context_lens: list[int] = []
 
-        for seq in seqs:
-            seq.init_diffusion_blocks()
+        for req in reqs:
+            req.init_diffusion_blocks()
 
-            total_seqlen = len(seq)
-            input_ids.extend(seq[seq.cached_num_tokens:])
-            positions.extend(range(seq.cached_num_tokens, total_seqlen))
+            total_seqlen = len(req)
+            input_ids.extend(req[req.cached_num_tokens:])
+            positions.extend(range(req.cached_num_tokens, total_seqlen))
             context_lens.append(0)
 
-            seqlen_q = total_seqlen - seq.cached_num_tokens
+            seqlen_q = total_seqlen - req.cached_num_tokens
             seqlen_k = total_seqlen
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
@@ -52,24 +52,24 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
 
-            if not seq.block_table:
+            if not req.page_table:
                 continue
-            has_padding_mask = seq.pad_prefix_len > 0
-            for i in range(0, seq.num_prefix_blocks):
-                if seq.block_cache_missed[i]:
-                    if has_padding_mask and i == seq.num_prefix_blocks - 1:
-                        slot_mapping.extend([-1] * self.block_size)
+            has_padding_mask = req.pad_prefix_len > 0
+            for i in range(0, req.num_prefix_blocks):
+                if req.page_cache_missed[i]:
+                    if has_padding_mask and i == req.num_prefix_blocks - 1:
+                        slot_mapping.extend([-1] * self.page_size)
                     else:
-                        start = seq.block_table[i] * self.block_size
-                        if i != seq.num_prefix_blocks - 1:
-                            end = start + self.block_size
+                        start = req.page_table[i] * self.page_size
+                        if i != req.num_prefix_blocks - 1:
+                            end = start + self.page_size
                         else:
-                            end = start + seq.prefix_last_block_num_tokens
+                            end = start + req.prefix_last_block_num_tokens
                         slot_mapping.extend(range(start, end))
                 else:
-                    slot_mapping.extend([-1] * self.block_size)
+                    slot_mapping.extend([-1] * self.page_size)
 
-        block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_page_tables(reqs)
         input_ids_tensor = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions_tensor = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         context_lens_tensor = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -93,7 +93,7 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
         )
         return input_ids_tensor, positions_tensor
 
-    def prepare_decode(self, seqs: list[FDV2Sequence]):
+    def prepare_decode(self, reqs: list[FDV2Req]):
         input_ids: list[int] = []
         positions: list[int] = []
         cu_seqlens_q = [0]
@@ -104,10 +104,10 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
         max_seqlen_q = 0
         max_seqlen_k = 0
 
-        for seq in seqs:
-            seq.next_diffusion_step()
+        for req in reqs:
+            req.next_diffusion_step()
             
-            cur_input_ids, cur_positions, cur_context_len = seq.diffusion_decoding_inputs()
+            cur_input_ids, cur_positions, cur_context_len = req.diffusion_decoding_inputs()
 
             input_ids.extend(cur_input_ids)
             positions.extend(cur_positions)
@@ -120,15 +120,15 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
 
-            if seq.diffusion_blocks[-1].is_active:
+            if req.diffusion_blocks[-1].is_active:
                 slot_mapping.extend([-1] * self.diffusion_block_size)
-            elif seq.diffusion_blocks[-1].is_to_cache:
+            elif req.diffusion_blocks[-1].is_to_cache:
                 need_kv_cache_store = True
-                num_pages_storing = seq.num_page_blocks_in_active_diffusion_block
-                total_num_pages = len(seq.block_table)
+                num_pages_storing = req.num_page_blocks_in_active_diffusion_block
+                total_num_pages = len(req.page_table)
                 for i in range(0, num_pages_storing):
-                    start = seq.block_table[(total_num_pages - 1) - num_pages_storing + i] * self.block_size
-                    end = start + self.block_size
+                    start = req.page_table[(total_num_pages - 1) - num_pages_storing + i] * self.page_size
+                    end = start + self.page_size
                     slot_mapping.extend(range(start, end))
                 
         input_ids_tensor = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -137,7 +137,7 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
         cu_seqlens_k_tensor = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping_tensor = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens_tensor = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_page_tables(reqs)
         set_fdv2_attn_metadata(
             False,
             slot_mapping=slot_mapping_tensor,
@@ -147,7 +147,7 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             block_tables=block_tables,
-            page_block_size=self.config.kvcache_block_size,
+            page_block_size=self.config.kv_cache_page_size,
             diffusion_block_size=self.diffusion_block_size,
             kv_cache_layout=self.config.kv_cache_layout,
             need_kv_cache_store=need_kv_cache_store,
@@ -177,11 +177,11 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
         graph.replay()
         return self.model.compute_logits(graph_vars["outputs"][:num_tokens])
 
-    def run(self, seqs: list[SequenceBase], is_prefill: bool) -> list[int]:
-        input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+    def run(self, reqs: list[DllmReq], is_prefill: bool) -> list[int]:
+        input_ids, positions = self.prepare_prefill(reqs) if is_prefill else self.prepare_decode(reqs)
+        temperatures = self.prepare_sample(reqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
-        sample_output = self.sampler(seqs, logits, temperatures) if self.rank == 0 else None
+        sample_output = self.sampler(reqs, logits, temperatures) if self.rank == 0 else None
         reset_fdv2_attn_metadata()
         return sample_output
 
@@ -200,8 +200,8 @@ class FastDLLMV2ModelRunner(ModelRunnerBase):
         set_warming_up(True)
         config = self.config
         hf_config = config.hf_config
-        max_num_seqs = min(self.config.max_num_seqs, 512)
-        max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
+        max_num_seqs = min(self.config.max_num_reqs, 512)
+        max_num_blocks = (config.max_model_len + self.page_size - 1) // self.page_size
         diffusion_block_size = self.diffusion_block_size
         
         max_num_tokens = max_num_seqs * diffusion_block_size

@@ -23,7 +23,7 @@ tilus.option.cache_dir("./cache")
 
 class TilusDecodeAttnForDifusionLM(tilus.Script):
     """
-        Fusing kvcache loading, attention against kvcache, self-attention, 
+        Fusing kv_cache loading, attention against kv_cache, self-attention, 
         and self-attention custom mask applying all together
     """
     def __init__(self, dtype: DataType, num_heads: int, num_kv_heads: int, 
@@ -43,7 +43,7 @@ class TilusDecodeAttnForDifusionLM(tilus.Script):
         self.score_scale = float(1.0 / np.sqrt(head_dim))
         self.group_size = num_heads // num_kv_heads
         
-        # For attn against kvcache
+        # For attn against kv_cache
         self.qkc_config = self.cuda.resolve_dot_config(
             dtype,
             f32,

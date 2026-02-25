@@ -171,4 +171,4 @@ class AutoBlockManager(BlockManagerBase):
         block_manager_cls = cls.BLOCK_MANAGER_MAPPING.get(config.model_type)
         if not block_manager_cls:
             raise ValueError(f"Unsupported model type: {config.model_type}")
-        return block_manager_cls(config.num_kvcache_blocks, config.kvcache_block_size)
+        return block_manager_cls(config.num_kv_cache_blocks, config.kv_cache_block_size)

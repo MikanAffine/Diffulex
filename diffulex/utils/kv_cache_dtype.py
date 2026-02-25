@@ -1,14 +1,13 @@
 """
 KV Cache dtype utilities.
 
-This module has been moved to diffulex.utils.quantization.kv_cache_dtype.
-This file is kept for backward compatibility and re-exports from the new location.
+Canonical implementation lives in diffulex.quantization.kv_cache_dtype.
+This module re-exports for backward compatibility.
 """
 
-# Re-export everything from the new location for backward compatibility
-from diffulex.utils.quantization.kv_cache_dtype import (
-    KvCacheDType,
-    KvCacheDTypeSpec,
+from diffulex.quantization.kv_cache_dtype import (
+    kv_cacheDType,
+    kv_cacheDTypeSpec,
     parse_kv_cache_dtype,
     ensure_scale_tensor,
     view_fp8_cache,
@@ -18,9 +17,9 @@ from diffulex.utils.quantization.kv_cache_dtype import (
 )
 
 __all__ = [
-    'KvCacheDType',
-    'KvCacheDTypeSpec',
-    'parse_kv_cache_dtype',
-    'ensure_scale_tensor',
-    'view_fp8_cache',
+    "kv_cacheDType",
+    "kv_cacheDTypeSpec",
+    "parse_kv_cache_dtype",
+    "ensure_scale_tensor",
+    "view_fp8_cache",
 ]

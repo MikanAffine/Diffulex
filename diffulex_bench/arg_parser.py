@@ -84,7 +84,7 @@ Examples:
         "--decoding-strategy",
         type=str,
         default="d2f",
-        choices=["d2f", "block_diffusion", "fast_dllm"],
+        choices=["d2f", "block_diffusion", "fast_dllm", "multi_block_diffusion"],
         help="Decoding strategy",
     )
     parser.add_argument(
@@ -227,22 +227,22 @@ Examples:
     
     # D2F-specific arguments
     parser.add_argument(
-        "--accept-threshold",
-        type=float,
-        default=0.9,
-        help="Accept threshold for D2F",
-    )
-    parser.add_argument(
-        "--complete-threshold",
-        type=float,
-        default=0.95,
-        help="Complete threshold for D2F",
-    )
-    parser.add_argument(
-        "--add-new-block-threshold",
+        "--add-block-threshold",
         type=float,
         default=0.1,
-        help="Add new block threshold for D2F",
+        help="Add block threshold for D2F",
+    )
+    parser.add_argument(
+        "--semi-complete-threshold",
+        type=float,
+        default=0.9,
+        help="Semi-complete threshold for D2F",
+    )
+    parser.add_argument(
+        "--decoding-threshold",
+        type=float,
+        default=0.9,
+        help="Decoding threshold for D2F",
     )
     parser.add_argument(
         "--diffusion-block-size",

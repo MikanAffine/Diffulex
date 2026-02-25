@@ -15,9 +15,10 @@ engine:
   use_lora: false
   enforce_eager: false
   
-  accept_threshold: 0.9
-  complete_threshold: 0.95
-  add_new_block_threshold: 0.1
+  decoding_thresholds:
+    add_block_threshold: 0.1
+    semi_complete_threshold: 0.9
+    decoding_threshold: 0.9
 
 eval:
   dataset_name: "gsm8k"

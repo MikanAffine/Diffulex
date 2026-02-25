@@ -655,7 +655,7 @@ class LLaDALoRA(TemplateLM):
                                 if state['state'] == 'to_cache']
                     
                 # 确定需要处理的部分
-                update_kvcache = 0
+                update_kv_cache = 0
                 if blocks_to_cache:
                     # 找到最早需要缓存的块
                     earliest_block_id = min(blocks_to_cache)
@@ -666,12 +666,12 @@ class LLaDALoRA(TemplateLM):
                     latest_pos = block_states[latest_block_id]['end_pos']
                     
                     # 更新这个范围内所有块的缓存
-                    update_kvcache = latest_pos - earliest_pos
+                    update_kv_cache = latest_pos - earliest_pos
                 
                 # 为前向传播创建输入序列
                 process_start_pos = cache_length
                 
-                if update_kvcache > 0:
+                if update_kv_cache > 0:
                     # 需要更新缓存 - 使用已完成的块
                     earliest_block_to_cache = min(blocks_to_cache)
                     input_seq = x_t[:, block_states[earliest_block_to_cache]['start_pos']:]
@@ -719,14 +719,14 @@ class LLaDALoRA(TemplateLM):
                     attention_bias=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=True,
-                    update_kvcache=update_kvcache+cache_length,
+                    update_kv_cache=update_kv_cache+cache_length,
                 )
                 
                 # 获取当前logits - LLaDA模型直接使用logits，不需要移位
                 logits = outputs.logits
                 
                 # 如果需要，更新缓存
-                if update_kvcache > 0:
+                if update_kv_cache > 0:
                     # 更新缓存
                     past_key_values = outputs.past_key_values
                     
@@ -839,8 +839,8 @@ class LLaDALoRA(TemplateLM):
                             current_blocks -= 1
                         # 如果前面有active块，保持当前块为active状态（不做任何操作）
 
-                if update_kvcache > 0:
-                    cache_length += update_kvcache
+                if update_kv_cache > 0:
+                    cache_length += update_kv_cache
                 # 安全检查
                 if step > 10000:
                     print(f"WARNING: Hit safety check at step {step}. Exiting generation loop.")

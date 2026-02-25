@@ -16,20 +16,20 @@ class DreamSamplerForDiffusionLM(SamplerShiftLogits):
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor,
                 top_p=None, top_k=None, margin_confidence=False, neg_entropy=False):
         context = self.fetch_attn_metadata()
-        seqs = context.seqs
-        split_logits = torch.split(logits, [len(seq) for seq in seqs] if context.is_prefill else context.seq_lens, dim=0)
+        reqs = context.reqs
+        split_logits = torch.split(logits, [len(req) for req in reqs] if context.is_prefill else context.seq_lens, dim=0)
         accepted_ids_map = {}
         sampled_tokens_map = {}
         true_local_ids_map = {}
-        for temperature, seq, seq_logits in zip(temperatures, seqs, split_logits):
+        for temperature, req, seq_logits in zip(temperatures, reqs, split_logits):
             true_local_ids_sub_map = {}
             accepted_ids_sub_map = {}
             sampled_tokens_sub_map = {}
             
-            last_logits = self._fetch_last_logits(seq_logits, seq)
+            last_logits = self._fetch_last_logits(seq_logits, req)
             
             shifted_logits = self._shift_logits(seq_logits, last_logits)
-            for block_id, block in enumerate(seq.diffusion_blocks):
+            for block_id, block in enumerate(req.diffusion_blocks):
                 if not block.is_active or sum(block.local_mask_tokens) == 0:
                     continue
                 
@@ -62,7 +62,7 @@ class DreamSamplerForDiffusionLM(SamplerShiftLogits):
                 accepted_ids_sub_map[str(block_id)] = accepted_ids_list
                 sampled_tokens_sub_map[str(block_id)] = sampled_tokens.to(device="cpu").tolist()
             
-            seq_idx = str(seq.seq_id)
+            seq_idx = str(req.req_id)
             true_local_ids_map[seq_idx] = true_local_ids_sub_map
             accepted_ids_map[seq_idx] = accepted_ids_sub_map
             sampled_tokens_map[seq_idx] = sampled_tokens_sub_map

@@ -16,9 +16,9 @@ is_rtx_xx90 = lambda x: "4090" in x or "3090" in x
 if is_rtx_xx90(torch.cuda.get_device_name(0)):
     # Placeholder for non-flash attention implementation
     flash_attn_varlen_func = None
-    flash_attn_with_kvcache = None
+    flash_attn_with_kv_cache = None
 else:
-    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+    from flash_attn import flash_attn_varlen_func, flash_attn_with_kv_cache
 
 from diffulex_legacy.utils.context import (
     ContextForCausalLM, ContextForDiffusionLM, 
@@ -27,7 +27,7 @@ from diffulex_legacy.utils.context import (
 
 
 @triton.jit
-def store_kvcache_kernel(
+def store_kv_cache_kernel(
     key_ptr,
     key_stride,
     value_ptr,
@@ -48,7 +48,7 @@ def store_kvcache_kernel(
     tl.store(v_cache_ptr + cache_offsets, value)
 
 
-def store_kvcache(
+def store_kv_cache(
     key: torch.Tensor, value: torch.Tensor, 
     k_cache: torch.Tensor, v_cache: torch.Tensor, 
     slot_mapping: torch.Tensor, model_type: str = 'causal_lm') -> None:
@@ -61,14 +61,14 @@ def store_kvcache(
     N = slot_mapping.numel() if model_type == 'diffusion_lm' else N
     assert N == slot_mapping.numel()
 
-    store_kvcache_kernel[(N,)](
+    store_kv_cache_kernel[(N,)](
         key, key.stride(0),
         value, value.stride(0),
         k_cache, v_cache, slot_mapping, D
     )
 
 
-def load_kvcache(
+def load_kv_cache(
     k_cache: torch.Tensor, v_cache: torch.Tensor,
     block_table: torch.Tensor, cache_seqlens):
     pass
@@ -121,7 +121,7 @@ class Attention(nn.Module):
                 mask: List[torch.Tensor] | None = None) -> torch.Tensor:
         timings = {
             "reshape_time": 0,
-            "store_kvcache_time": 0,
+            "store_kv_cache_time": 0,
             "attn_time": 0,
             "split_time": 0,
             "loadkv_time": 0,
@@ -147,8 +147,8 @@ class Attention(nn.Module):
         if k_cache.numel() and v_cache.numel():
             store_start = time.time()
             if not (self.model_type == 'diffusion_lm' and context.slot_mapping.numel() == 0):
-                store_kvcache(k, v, k_cache, v_cache, context.slot_mapping, self.model_type)
-            timings['store_kvcache_time'] = time.time() - store_start
+                store_kv_cache(k, v, k_cache, v_cache, context.slot_mapping, self.model_type)
+            timings['store_kv_cache_time'] = time.time() - store_start
 
         # Prefill / Decode logic
         if context.is_prefill:
@@ -181,7 +181,7 @@ class Attention(nn.Module):
         else:
             if self.model_type == 'causal_lm':
                 decode_start = time.time()
-                o = flash_attn_with_kvcache(
+                o = flash_attn_with_kv_cache(
                     q.unsqueeze(1), k_cache, v_cache,
                     cache_seqlens=context.context_lens, block_table=context.block_tables,
                     softmax_scale=self.scale, causal=self.causal

@@ -32,16 +32,14 @@ class EngineConfig:
     gpu_memory_utilization: float = 0.9
     max_model_len: int = 2048
     max_num_batched_tokens: int = 4096
-    max_num_seqs: int = 128
+    max_num_reqs: int = 128
     
     # Engine behavior configuration
     enforce_eager: bool = False
     kv_cache_layout: str = "unified"  # Options: unified, distinct
     
     # D2F-specific configuration
-    accept_threshold: float = 0.9
-    complete_threshold: float = 0.95
-    add_new_block_threshold: float = 0.1
+    decoding_thresholds: Optional[Dict[str, float]] = None  # {add_block_threshold, semi_complete_threshold, decoding_threshold}
     diffusion_block_size: int = 32
     
     # Quantization configuration
@@ -55,7 +53,9 @@ class EngineConfig:
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "EngineConfig":
         """Create engine configuration from dictionary"""
-        return cls(**config_dict)
+        valid = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in config_dict.items() if k in valid}
+        return cls(**filtered)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -66,7 +66,7 @@ class EngineConfig:
     
     def get_diffulex_kwargs(self) -> Dict[str, Any]:
         """Get arguments to pass to Diffulex engine"""
-        return {
+        kwargs = {
             'model_name': self.model_name,
             'decoding_strategy': self.decoding_strategy,
             'mask_token_id': self.mask_token_id,
@@ -75,17 +75,20 @@ class EngineConfig:
             'gpu_memory_utilization': self.gpu_memory_utilization,
             'max_model_len': self.max_model_len,
             'max_num_batched_tokens': self.max_num_batched_tokens,
-            'max_num_seqs': self.max_num_seqs,
+            'max_num_reqs': self.max_num_reqs,
             'use_lora': self.use_lora,
             'lora_path': self.lora_path if self.use_lora else "",
             'enforce_eager': self.enforce_eager,
             'kv_cache_layout': self.kv_cache_layout,
-            'accept_threshold': self.accept_threshold,
-            'complete_threshold': self.complete_threshold,
-            'add_new_block_threshold': self.add_new_block_threshold,
             'diffusion_block_size': self.diffusion_block_size,
         }
-        
+        dt = self.decoding_thresholds or {
+            'add_block_threshold': 0.1,
+            'semi_complete_threshold': 0.9,
+            'decoding_threshold': 0.9,
+        }
+        kwargs['decoding_thresholds'] = dt
+
         # Add quantization parameters if specified
         if self.kv_cache_dtype is not None:
             kwargs['kv_cache_dtype'] = self.kv_cache_dtype
@@ -171,9 +174,8 @@ class BenchmarkConfig:
                 'model_path', 'tokenizer_path', 'model_name', 'decoding_strategy',
                 'mask_token_id', 'use_lora', 'lora_path', 'tensor_parallel_size',
                 'data_parallel_size', 'gpu_memory_utilization', 'max_model_len',
-                'max_num_batched_tokens', 'max_num_seqs', 'enforce_eager',
-                'kv_cache_layout', 'accept_threshold', 'complete_threshold',
-                'add_new_block_threshold', 'diffusion_block_size',
+                'max_num_batched_tokens', 'max_num_reqs', 'enforce_eager',
+                'kv_cache_layout', 'decoding_thresholds', 'diffusion_block_size',
                 'kv_cache_dtype', 'decode_mode', 'linear_attn_weight_dtype',
                 'linear_mlp_weight_dtype', 'linear_attn_act_dtype', 'linear_mlp_act_dtype'
             }

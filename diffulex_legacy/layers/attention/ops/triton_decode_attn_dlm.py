@@ -24,7 +24,7 @@ def CHECK_ATTENTION(o: torch.Tensor, q: torch.Tensor, k_new: torch.Tensor, v_new
     from torch.nn.functional import scaled_dot_product_attention as sdpa
     from torch.nn.attention import SDPBackend, sdpa_kernel
     
-    from diffulex_legacy.layers.attention.ops import load_kvcache
+    from diffulex_legacy.layers.attention.ops import load_kv_cache
     
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -35,7 +35,7 @@ def CHECK_ATTENTION(o: torch.Tensor, q: torch.Tensor, k_new: torch.Tensor, v_new
     v_cache_unified = rearrange(v_cache, "b h d s -> b s h d").contiguous()
     
     transpose_fn = lambda x: rearrange(x, 's h d -> 1 h s d').contiguous()
-    k, v = load_kvcache(k_cache_unified, v_cache_unified, context, k_new, v_new)
+    k, v = load_kv_cache(k_cache_unified, v_cache_unified, context, k_new, v_new)
     q, k, v = map(transpose_fn, (q, k, v))
     mask = context.block_mask_for_checking
     with sdpa_kernel(SDPBackend.MATH):

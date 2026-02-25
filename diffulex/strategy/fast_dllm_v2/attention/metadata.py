@@ -4,12 +4,12 @@ from typing import List
 from dataclasses import dataclass
 
 from diffulex.attention.metadata import AttnMetaDataBase
-from diffulex.strategy.fast_dllm_v2.engine.sequence import FastDLLMV2Sequence
+from diffulex.strategy.fast_dllm_v2.engine.request import FDV2Req
 
 
 @dataclass
 class FDV2AttnMetaData(AttnMetaDataBase):
-    seqs: List[FastDLLMV2Sequence] = None
+    reqs: List[FDV2Req] | None = None
     kv_cache_layout: str = "unified"
     need_kv_cache_store: bool = True
     

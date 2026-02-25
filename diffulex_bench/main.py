@@ -39,18 +39,23 @@ def config_to_model_args(config: BenchmarkConfig) -> str:
         'gpu_memory_utilization': engine.gpu_memory_utilization,
         'max_model_len': engine.max_model_len,
         'max_num_batched_tokens': engine.max_num_batched_tokens,
-        'max_num_seqs': engine.max_num_seqs,
+        'max_num_reqs': engine.max_num_reqs,
         'temperature': eval_config.temperature,
         'max_new_tokens': eval_config.max_tokens,
         'use_lora': engine.use_lora,
         'enforce_eager': engine.enforce_eager,
         'kv_cache_layout': engine.kv_cache_layout,
-        'accept_threshold': engine.accept_threshold,
-        'complete_threshold': engine.complete_threshold,
-        'add_new_block_threshold': engine.add_new_block_threshold,
         'diffusion_block_size': engine.diffusion_block_size,
         'wait_ready': True,
     }
+    dt = engine.decoding_thresholds or {
+        'add_block_threshold': 0.1,
+        'semi_complete_threshold': 0.9,
+        'decoding_threshold': 0.9,
+    }
+    args_dict['add_block_threshold'] = dt['add_block_threshold']
+    args_dict['semi_complete_threshold'] = dt['semi_complete_threshold']
+    args_dict['decoding_threshold'] = dt['decoding_threshold']
     
     # Add quantization parameters if specified
     if engine.kv_cache_dtype is not None:
@@ -71,7 +76,10 @@ def config_to_model_args(config: BenchmarkConfig) -> str:
     
     if engine.use_lora and engine.lora_path:
         args_dict['lora_path'] = engine.lora_path
-    
+
+    if eval_config.save_results and eval_config.output_dir:
+        args_dict['save_dir'] = eval_config.output_dir
+
     # Convert to string format: key1=value1,key2=value2
     args_list = [f"{k}={v}" for k, v in args_dict.items()]
     return ','.join(args_list)
@@ -142,6 +150,9 @@ def run_benchmark(config: BenchmarkConfig) -> None:
         
         if config.eval.dataset_limit:
             sys.argv.extend(["--limit", str(config.eval.dataset_limit)])
+
+        if config.eval.save_results:
+            sys.argv.extend(["--log_samples"])
         
         # Add any additional lm_eval arguments from config if needed
         # For now, we use default batch_size=1
@@ -230,8 +241,8 @@ def load_config_from_args(args) -> BenchmarkConfig:
             config.engine.kv_cache_dtype = args.kv_cache_dtype
         if getattr(args, "max_model_len", None) is not None:
             config.engine.max_model_len = args.max_model_len
-        if getattr(args, "max_num_seqs", None) is not None:
-            config.engine.max_num_seqs = args.max_num_seqs
+        if getattr(args, "max_num_reqs", None) is not None:
+            config.engine.max_num_reqs = args.max_num_reqs
         if getattr(args, "max_num_batched_tokens", None) is not None:
             config.engine.max_num_batched_tokens = args.max_num_batched_tokens
     else:
@@ -251,13 +262,15 @@ def load_config_from_args(args) -> BenchmarkConfig:
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=args.max_model_len,
             max_num_batched_tokens=getattr(args, 'max_num_batched_tokens', 4096),
-            max_num_seqs=getattr(args, 'max_num_seqs', 128),
+            max_num_reqs=getattr(args, 'max_num_reqs', 128),
             use_lora=args.use_lora,
             lora_path=args.lora_path,
             kv_cache_layout=getattr(args, 'kv_cache_layout', 'unified'),
-            accept_threshold=args.accept_threshold,
-            complete_threshold=args.complete_threshold,
-            add_new_block_threshold=args.add_new_block_threshold,
+            decoding_thresholds={
+                'add_block_threshold': getattr(args, 'add_block_threshold', 0.1),
+                'semi_complete_threshold': getattr(args, 'semi_complete_threshold', 0.9),
+                'decoding_threshold': getattr(args, 'decoding_threshold', 0.9),
+            },
             diffusion_block_size=args.diffusion_block_size,
             kv_cache_dtype=getattr(args, 'kv_cache_dtype', None),
             decode_mode=getattr(args, 'decode_mode', None),

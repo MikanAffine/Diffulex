@@ -4,14 +4,14 @@ from typing import List
 from dataclasses import dataclass
 
 from diffulex.attention.metadata import AttnMetaDataBase
-from diffulex.strategy.d2f.engine.sequence import D2FSequence
+from diffulex.strategy.d2f.engine.request import D2FReq
 
 
 @dataclass
 class D2FAttnMetaData(AttnMetaDataBase):
     seq_lens: list[int] = None
     seq_lens_ts: torch.Tensor | None = None
-    seqs: List[D2FSequence] = None
+    reqs: List[D2FReq] | None = None
     kv_cache_layout: str = "unified"
     need_kv_cache_store: bool = True
     
@@ -20,8 +20,8 @@ class D2FAttnMetaData(AttnMetaDataBase):
             self.total_lens = self.seq_lens_ts + self.context_lens
     
     @property
-    def total_num_seqs(self) -> int:
-        return len(self.seqs) if self.seqs is not None else 0
+    def total_num_reqs(self) -> int:
+        return len(self.reqs) if self.reqs is not None else 0
 
 
 D2F_ATTN_METADATA = D2FAttnMetaData()
@@ -38,7 +38,7 @@ def set_d2f_attn_metadata(
     slot_mapping: torch.Tensor | None = None,
     context_lens: torch.Tensor | None = None,
     block_tables: torch.Tensor | None = None,
-    seqs: List[D2FSequence] | None = None,
+    reqs: List[D2FReq] | None = None,
     seq_lens: list[int] | None = None,
     seq_lens_ts: torch.Tensor | None = None,
     kv_cache_layout: str = "unified",
@@ -59,7 +59,7 @@ def set_d2f_attn_metadata(
         block_tables=block_tables,
         seq_lens=seq_lens,
         seq_lens_ts=seq_lens_ts,
-        seqs=seqs,
+        reqs=reqs,
         kv_cache_layout=kv_cache_layout,
         need_kv_cache_store=need_kv_cache_store,
         diffusion_block_size=diffusion_block_size,

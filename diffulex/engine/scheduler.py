@@ -3,39 +3,42 @@ from collections import deque
 from abc import ABC, abstractmethod
 
 from diffulex.config import Config
-from diffulex.engine.sequence import SequenceBase
-from diffulex.engine.kvcache_manager import AutoKVCacheManager
+from diffulex.engine.request import DllmReq
+from diffulex.engine.kv_cache_manager import AutoKVCacheManager
 from diffulex.engine.strategy_registry import DiffulexStrategyRegistry
+from diffulex.mixin.multi_block.engine.scheduler import SchedulerMultiBlockMixin
 
 
-class SchedulerBase(ABC):
+class SchedulerBase(
+    ABC, 
+    SchedulerMultiBlockMixin
+):
     def __init__(self, config: Config):
         self.config = config
-        self.max_num_seqs = config.max_num_seqs
+        self.max_num_reqs = config.max_num_reqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
-        self.block_manager = AutoKVCacheManager.from_config(config)
-        self.waiting: deque[SequenceBase] = deque()
-        self.running: deque[SequenceBase] = deque()
+        self.kv_cache_manager = AutoKVCacheManager.from_config(config)
+        self.waiting_reqs: deque[DllmReq] = deque()
+        self.running_reqs: deque[DllmReq] = deque()
 
-    @abstractmethod
     def is_finished(self) -> bool:
+        return not self.waiting_reqs and not self.running_reqs
+
+    @abstractmethod
+    def add(self, req: DllmReq) -> None:
         pass
 
     @abstractmethod
-    def add(self, seq: SequenceBase) -> None:
+    def schedule(self) -> tuple[list[DllmReq], bool]:
         pass
 
     @abstractmethod
-    def schedule(self) -> tuple[list[SequenceBase], bool]:
+    def preempt(self, req: DllmReq) -> None:
         pass
 
     @abstractmethod
-    def preempt(self, seq: SequenceBase) -> None:
-        pass
-
-    @abstractmethod
-    def postprocess(self, seqs: list[SequenceBase], sampler_output):
+    def postprocess(self, reqs: list[DllmReq], sampler_output):
         pass
 
 

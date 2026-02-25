@@ -67,7 +67,7 @@ class LLMEngine:
         else:
             raise ValueError(f"Unsupported engine type: {self.engine_type}")
         
-        seq.block_size = self.config.kvcache_block_size
+        seq.block_size = self.config.kv_cache_block_size
         self.scheduler.add(seq)
         # Return seq_id so caller can build a stable mapping
         return seq.seq_id

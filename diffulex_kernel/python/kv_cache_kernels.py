@@ -10,7 +10,7 @@ from diffulex.attention.metadata import AttnMetaDataBase
     
 
 @triton.jit
-def dllm_store_kvcache_kernel_unified_bf16(
+def dllm_store_kv_cache_kernel_unified_bf16(
     key_ptr,
     key_stride,
     value_ptr,
@@ -35,7 +35,7 @@ def dllm_store_kvcache_kernel_unified_bf16(
 
 
 @triton.jit
-def dllm_store_kvcache_kernel_distinct_bf16(
+def dllm_store_kv_cache_kernel_distinct_bf16(
     k_ptr, v_ptr, k_cache_ptr, v_cache_ptr, slot_mapping_ptr,
     k_stride, v_stride,  
     k_cache_stride_nblks, k_cache_stride_h, k_cache_stride_dx, k_cache_stride_blk_sz, k_cache_stride_x,
@@ -87,7 +87,7 @@ def dllm_store_kvcache_kernel_distinct_bf16(
     
 
 @triton.jit
-def dllm_store_kvcache_kernel_distinct_fp8(
+def dllm_store_kv_cache_kernel_distinct_fp8(
     k_quantized_ptr, v_quantized_ptr, k_cache_ptr, v_cache_ptr, slot_mapping_ptr,
     k_quantized_stride, v_quantized_stride,
     k_cache_stride_nblks, k_cache_stride_h, k_cache_stride_dx, k_cache_stride_blk_sz, k_cache_stride_x,
@@ -134,7 +134,7 @@ def dllm_store_kvcache_kernel_distinct_fp8(
     tl.store(v_cache_ptr + v_cache_offs, v_uint8)
 
 
-def _store_kvcache_distinct_fp8(key: torch.Tensor, value: torch.Tensor,
+def _store_kv_cache_distinct_fp8(key: torch.Tensor, value: torch.Tensor,
                                 k_cache: torch.Tensor, v_cache: torch.Tensor,
                                 slot_mapping: torch.Tensor,
                                 k_scale: torch.Tensor, v_scale: torch.Tensor,
@@ -162,7 +162,7 @@ def _store_kvcache_distinct_fp8(key: torch.Tensor, value: torch.Tensor,
     assert value_quantized.dtype == torch.uint8, f"Expected uint8, got {value_quantized.dtype}"
     
     GRID = (N, )
-    dllm_store_kvcache_kernel_distinct_fp8[GRID](
+    dllm_store_kv_cache_kernel_distinct_fp8[GRID](
         key_quantized, value_quantized,
         k_cache, v_cache,
         slot_mapping,
@@ -173,7 +173,7 @@ def _store_kvcache_distinct_fp8(key: torch.Tensor, value: torch.Tensor,
     )
 
 
-def _store_kvcache_distinct_bf16(key: torch.Tensor, value: torch.Tensor, 
+def _store_kv_cache_distinct_bf16(key: torch.Tensor, value: torch.Tensor, 
                                   k_cache: torch.Tensor, v_cache: torch.Tensor, 
                                   slot_mapping: torch.Tensor) -> None:
     """Helper function for BF16 distinct layout store."""
@@ -186,7 +186,7 @@ def _store_kvcache_distinct_bf16(key: torch.Tensor, value: torch.Tensor,
     assert N == slot_mapping.numel()
     
     GRID = (N, )
-    dllm_store_kvcache_kernel_distinct_bf16[GRID](
+    dllm_store_kv_cache_kernel_distinct_bf16[GRID](
         key, value,
         k_cache, v_cache,
         slot_mapping,
@@ -198,7 +198,7 @@ def _store_kvcache_distinct_bf16(key: torch.Tensor, value: torch.Tensor,
 
 
 @triton.jit
-def dllm_store_kvcache_kernel_unified_fp8(
+def dllm_store_kv_cache_kernel_unified_fp8(
     key_quantized_ptr,
     key_quantized_stride,
     value_quantized_ptr,
@@ -228,7 +228,7 @@ def dllm_store_kvcache_kernel_unified_fp8(
     tl.store(v_cache_ptr + cache_offsets, value_uint8)
 
 
-def _store_kvcache_unified_fp8(key: torch.Tensor, value: torch.Tensor,
+def _store_kv_cache_unified_fp8(key: torch.Tensor, value: torch.Tensor,
                                 k_cache: torch.Tensor, v_cache: torch.Tensor,
                                 slot_mapping: torch.Tensor,
                                 k_scale: torch.Tensor, v_scale: torch.Tensor,
@@ -259,14 +259,14 @@ def _store_kvcache_unified_fp8(key: torch.Tensor, value: torch.Tensor,
     # Kernel uses slot * D as offset, which works with stride(1) == D
     # Pass cache directly to kernel, matching BF16 kernel behavior
     # The kernel expects cache to have stride(1) == D, which we've already verified
-    dllm_store_kvcache_kernel_unified_fp8[(N,)](
+    dllm_store_kv_cache_kernel_unified_fp8[(N,)](
         key_quantized, key_quantized.stride(0),
         value_quantized, value_quantized.stride(0),
         k_cache, v_cache, slot_mapping, D
     )
 
 
-def _store_kvcache_unified_bf16(key: torch.Tensor, value: torch.Tensor, 
+def _store_kv_cache_unified_bf16(key: torch.Tensor, value: torch.Tensor, 
                                  k_cache: torch.Tensor, v_cache: torch.Tensor, 
                                  slot_mapping: torch.Tensor) -> None:
     """Helper function for BF16 unified layout store."""
@@ -277,7 +277,7 @@ def _store_kvcache_unified_bf16(key: torch.Tensor, value: torch.Tensor,
     assert k_cache.stride(1) == D and v_cache.stride(1) == D
     assert N == slot_mapping.numel(), f"`N`: {N}, `slot_mapping.numel()`: {slot_mapping.numel()}"
     
-    dllm_store_kvcache_kernel_unified_bf16[(N,)](
+    dllm_store_kv_cache_kernel_unified_bf16[(N,)](
         key, key.stride(0),
         value, value.stride(0),
         k_cache, v_cache, slot_mapping, D
@@ -285,7 +285,7 @@ def _store_kvcache_unified_bf16(key: torch.Tensor, value: torch.Tensor,
         
 
 @triton.jit
-def load_kvcache_kernel_bf16(k_cache_ptr, v_cache_ptr,
+def load_kv_cache_kernel_bf16(k_cache_ptr, v_cache_ptr,
                         k_new_ptr, v_new_ptr,
                         block_table_ptr,
                         k_out_ptr, v_out_ptr, 
@@ -388,7 +388,7 @@ def load_kvcache_kernel_bf16(k_cache_ptr, v_cache_ptr,
 
 
 @triton.jit
-def load_kvcache_kernel_bf16_distinct(
+def load_kv_cache_kernel_bf16_distinct(
     k_cache_ptr,
     v_cache_ptr,
     k_new_ptr,
@@ -521,7 +521,7 @@ def load_kvcache_kernel_bf16_distinct(
 
 
 @triton.jit
-def load_kvcache_kernel_fp8_distinct(
+def load_kv_cache_kernel_fp8_distinct(
     k_cache_ptr,
     v_cache_ptr,
     k_scale_ptr,
@@ -662,7 +662,7 @@ def load_kvcache_kernel_fp8_distinct(
             tl.store(v_out_ptr + offs_cur_kv_new_to_out, v_new)
 
 @triton.jit
-def load_kvcache_kernel_fp8_unified(
+def load_kv_cache_kernel_fp8_unified(
     k_cache_ptr, v_cache_ptr,
     k_scale_ptr, v_scale_ptr,
     k_new_ptr, v_new_ptr,
@@ -768,7 +768,7 @@ def load_kvcache_kernel_fp8_unified(
             tl.store(v_out_ptr + offs_cur_kv_new_to_out, v_new)
 
 
-def _load_kvcache_bf16(k_cache: torch.Tensor, v_cache: torch.Tensor,
+def _load_kv_cache_bf16(k_cache: torch.Tensor, v_cache: torch.Tensor,
                  attn_metadata: AttnMetaDataBase,
                  k_new: torch.Tensor, v_new: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Helper function for BF16 load.
@@ -822,7 +822,7 @@ def _load_kvcache_bf16(k_cache: torch.Tensor, v_cache: torch.Tensor,
     if is_unified:
         # Unified cache: [NBlks, BlkSz, Hkv, Hdim]
         kv_cache_stride_nblks, kv_cache_stride_blk, kv_cache_stride_h, kv_cache_stride_d = k_cache.stride()
-        load_kvcache_kernel_bf16[GRID](
+        load_kv_cache_kernel_bf16[GRID](
             k_cache, v_cache,
             k_new, v_new,
             attn_metadata.block_tables,
@@ -846,7 +846,7 @@ def _load_kvcache_bf16(k_cache: torch.Tensor, v_cache: torch.Tensor,
     else:
         # Distinct cache needs a dedicated gather kernel due to K split layout.
         x = int(k_cache.shape[-1])
-        load_kvcache_kernel_bf16_distinct[GRID](
+        load_kv_cache_kernel_bf16_distinct[GRID](
             k_cache, v_cache,
             k_new, v_new,
             attn_metadata.block_tables,
@@ -873,7 +873,7 @@ def _load_kvcache_bf16(k_cache: torch.Tensor, v_cache: torch.Tensor,
     return k_output, v_output
 
 
-def store_kvcache_unified_layout(key: torch.Tensor, value: torch.Tensor, 
+def store_kv_cache_unified_layout(key: torch.Tensor, value: torch.Tensor, 
                                  k_cache: torch.Tensor, v_cache: torch.Tensor, 
                                  slot_mapping: torch.Tensor, attn_metadata: AttnMetaDataBase) -> None:
     """
@@ -897,17 +897,17 @@ def store_kvcache_unified_layout(key: torch.Tensor, value: torch.Tensor,
     from diffulex.utils.quantization.context import get_kv_cache_strategy
     strategy = get_kv_cache_strategy()
     if strategy is None:
-        _store_kvcache_unified_bf16(key, value, k_cache, v_cache, slot_mapping)
+        _store_kv_cache_unified_bf16(key, value, k_cache, v_cache, slot_mapping)
         return
     
     fmt = getattr(strategy, "kv_cache_format", "bf16")
     if fmt == "bf16":
-        _store_kvcache_unified_bf16(key, value, k_cache, v_cache, slot_mapping)
+        _store_kv_cache_unified_bf16(key, value, k_cache, v_cache, slot_mapping)
         return
     if fmt == "fp8":
         if attn_metadata.k_scale is None or attn_metadata.v_scale is None:
             raise ValueError("FP8 quantization requires k_scale and v_scale in metadata")
-        _store_kvcache_unified_fp8(
+        _store_kv_cache_unified_fp8(
             key, value, k_cache, v_cache, slot_mapping,
             attn_metadata.k_scale, attn_metadata.v_scale,
             strategy=strategy,
@@ -916,7 +916,7 @@ def store_kvcache_unified_layout(key: torch.Tensor, value: torch.Tensor,
     raise ValueError(f"Unsupported kv_cache_format={fmt!r} for unified layout (strategy={type(strategy)})")
 
 
-def store_kvcache_distinct_layout(key: torch.Tensor, value: torch.Tensor, 
+def store_kv_cache_distinct_layout(key: torch.Tensor, value: torch.Tensor, 
                                   k_cache: torch.Tensor, v_cache: torch.Tensor, 
                                   slot_mapping: torch.Tensor, attn_metadata: AttnMetaDataBase) -> None:
     """
@@ -926,17 +926,17 @@ def store_kvcache_distinct_layout(key: torch.Tensor, value: torch.Tensor,
     from diffulex.utils.quantization.context import get_kv_cache_strategy
     strategy = get_kv_cache_strategy()
     if strategy is None:
-        _store_kvcache_distinct_bf16(key, value, k_cache, v_cache, slot_mapping)
+        _store_kv_cache_distinct_bf16(key, value, k_cache, v_cache, slot_mapping)
         return
     
     fmt = getattr(strategy, "kv_cache_format", "bf16")
     if fmt == "bf16":
-        _store_kvcache_distinct_bf16(key, value, k_cache, v_cache, slot_mapping)
+        _store_kv_cache_distinct_bf16(key, value, k_cache, v_cache, slot_mapping)
         return
     if fmt == "fp8":
         if attn_metadata.k_scale is None or attn_metadata.v_scale is None:
             raise ValueError("FP8 quantization requires k_scale and v_scale in metadata")
-        _store_kvcache_distinct_fp8(
+        _store_kv_cache_distinct_fp8(
             key, value, k_cache, v_cache, slot_mapping,
             attn_metadata.k_scale, attn_metadata.v_scale,
             strategy=strategy,
@@ -945,7 +945,7 @@ def store_kvcache_distinct_layout(key: torch.Tensor, value: torch.Tensor,
     raise ValueError(f"Unsupported kv_cache_format={fmt!r} for distinct layout (strategy={type(strategy)})")
 
 
-def _load_kvcache_fp8(k_cache: torch.Tensor, v_cache: torch.Tensor,
+def _load_kv_cache_fp8(k_cache: torch.Tensor, v_cache: torch.Tensor,
                       attn_metadata: AttnMetaDataBase,
                       k_new: torch.Tensor, v_new: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Helper function for FP8 load.
@@ -1005,7 +1005,7 @@ def _load_kvcache_fp8(k_cache: torch.Tensor, v_cache: torch.Tensor,
         kv_cache_stride_nblks, kv_cache_stride_blk, kv_cache_stride_h, kv_cache_stride_d = k_cache_fp8.stride()
 
         GRID = (NUM_SEQS, MAX_SEQ_BLOCKS, H_KV)
-        load_kvcache_kernel_fp8_unified[GRID](
+        load_kv_cache_kernel_fp8_unified[GRID](
             k_cache_fp8, v_cache_fp8,
             k_scale, v_scale,
             k_new, v_new,
@@ -1043,7 +1043,7 @@ def _load_kvcache_fp8(k_cache: torch.Tensor, v_cache: torch.Tensor,
                 v_scale_broadcast = v_scale.view(1, 1, -1, 1)
                 k_cache_bf16_ref = (k_cache_fp32 * k_scale_broadcast).to(torch.bfloat16)
                 v_cache_bf16_ref = (v_cache_fp32 * v_scale_broadcast).to(torch.bfloat16)
-                k_ref, v_ref = _load_kvcache_bf16(k_cache_bf16_ref, v_cache_bf16_ref, attn_metadata, k_new, v_new)
+                k_ref, v_ref = _load_kv_cache_bf16(k_cache_bf16_ref, v_cache_bf16_ref, attn_metadata, k_new, v_new)
                 max_diff_k = (k_ref - k_output).abs().max().item()
                 max_diff_v = (v_ref - v_output).abs().max().item()
                 print(f"[DIFFULEX_DEBUG_FP8_LOAD_REF] max_abs_diff k={max_diff_k:.6g} v={max_diff_v:.6g} (total_tokens={total_tokens})")
@@ -1088,7 +1088,7 @@ def _load_kvcache_fp8(k_cache: torch.Tensor, v_cache: torch.Tensor,
         v_output = torch.empty_like(k_output)
 
         GRID = (NUM_SEQS, MAX_SEQ_BLOCKS, H_KV)
-        load_kvcache_kernel_fp8_distinct[GRID](
+        load_kv_cache_kernel_fp8_distinct[GRID](
             k_cache_fp8, v_cache_fp8,
             k_scale, v_scale,
             k_new, v_new,
@@ -1116,7 +1116,7 @@ def _load_kvcache_fp8(k_cache: torch.Tensor, v_cache: torch.Tensor,
         return k_output, v_output
 
 
-def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
+def load_kv_cache(k_cache: torch.Tensor, v_cache: torch.Tensor,
                  attn_metadata: AttnMetaDataBase,
                  k_new: torch.Tensor, v_new: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1126,11 +1126,11 @@ def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
     from diffulex.utils.quantization.context import get_kv_cache_strategy
     strategy = get_kv_cache_strategy()
     if strategy is None:
-        return _load_kvcache_bf16(k_cache, v_cache, attn_metadata, k_new, v_new)
+        return _load_kv_cache_bf16(k_cache, v_cache, attn_metadata, k_new, v_new)
     
     fmt = getattr(strategy, "kv_cache_format", "bf16")
     if fmt == "bf16":
-        return _load_kvcache_bf16(k_cache, v_cache, attn_metadata, k_new, v_new)
+        return _load_kv_cache_bf16(k_cache, v_cache, attn_metadata, k_new, v_new)
     if fmt == "fp8":
-        return _load_kvcache_fp8(k_cache, v_cache, attn_metadata, k_new, v_new)
+        return _load_kv_cache_fp8(k_cache, v_cache, attn_metadata, k_new, v_new)
     raise ValueError(f"Unsupported kv_cache_format={fmt!r} for load (strategy={type(strategy)})")

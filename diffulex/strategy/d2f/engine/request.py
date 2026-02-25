@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from diffulex.config import Config
 from diffulex.sampling_params import SamplingParams
-from diffulex.engine.sequence import AutoSequence, SequenceBase
+from diffulex.engine.request import AutoReq, DllmReq
 
 
 class D2FDiffusionBlockStatus(Enum):
@@ -33,7 +33,7 @@ class D2FDiffusionBlock:
     add_new_block_threshold: float = 0.1
     complete_threshold: float = 0.9
 
-    seq: "D2FSequence" | None = None
+    req: "D2FReq" | None = None
     pre_block: "D2FDiffusionBlock" | None = None
     suf_block: "D2FDiffusionBlock" | None = None
 
@@ -41,7 +41,7 @@ class D2FDiffusionBlock:
         self.global_end_id = self.global_start_id + self.size
 
     def __getitem__(self, key: int) -> int:
-        return self.seq[self.global_start_id + key]  # type: ignore[index]
+        return self.req[self.global_start_id + key]  # type: ignore[index]
 
     def __len__(self) -> int:
         return self.size
@@ -80,13 +80,13 @@ class D2FDiffusionBlock:
 
     @property
     def token_ids(self) -> list[int]:
-        if self.seq is None:
-            raise RuntimeError("Diffusion block is not attached to a sequence.")
-        return self.seq.token_ids[self.global_start_id : self.global_end_id]
+        if self.req is None:
+            raise RuntimeError("Diffusion block is not attached to a req.")
+        return self.req.token_ids[self.global_start_id : self.global_end_id]
 
     @property
     def local_mask_tokens(self) -> list[bool]:
-        return [token_id == self.seq.mask_token_id for token_id in self.token_ids]  # type: ignore[arg-type]
+        return [token_id == self.req.mask_token_id for token_id in self.token_ids]  # type: ignore[arg-type]
 
     @property
     def local_mask_token_ids(self) -> list[int]:
@@ -94,11 +94,11 @@ class D2FDiffusionBlock:
 
     @property
     def global_mask_token_ids(self) -> list[int]:
-        if self.seq is None:
+        if self.req is None:
             return []
         offset = self.global_start_id
-        in_cache_blocks = list(range(sum(self.seq.in_cache_blocks)))
-        offset -= sum(self.seq.diffusion_blocks[block_id].size for block_id in in_cache_blocks)
+        in_cache_blocks = list(range(sum(self.req.in_cache_blocks)))
+        offset -= sum(self.req.diffusion_blocks[block_id].size for block_id in in_cache_blocks)
         return [mask_id + offset for mask_id in self.local_mask_token_ids]
 
     def remaining_length(self, start_idx: int) -> int:
@@ -113,19 +113,19 @@ class D2FDiffusionBlock:
             self.status = D2FDiffusionBlockStatus.IN_CACHE
 
     def modify_token(self, local_token_id: int, modified_to: int) -> None:
-        if self.seq is None:
-            raise RuntimeError("Diffusion block is not attached to a sequence.")
+        if self.req is None:
+            raise RuntimeError("Diffusion block is not attached to a req.")
         target_id = local_token_id + self.global_start_id
-        assert self.seq.token_ids[target_id] == self.mask_token_id
+        assert self.req.token_ids[target_id] == self.mask_token_id
         # Hot path: avoid per-token CUDA -> CPU sync via Tensor.item().
         # `modified_to` should be a python int (or at least int-castable).
-        self.seq.token_ids[target_id] = int(modified_to)  # type: ignore[assignment]
-        self.seq.new_tokens += 1
+        self.req.token_ids[target_id] = int(modified_to)  # type: ignore[assignment]
+        self.req.new_tokens += 1
 
 
-@AutoSequence.register("d2f", is_default=True)
-class D2FSequence(SequenceBase):
-    """Sequence implementation tailored for diffusion-based decoding."""
+@AutoReq.register("d2f", is_default=True)
+class D2FReq(DllmReq):
+    """Req implementation tailored for diffusion-based decoding."""
 
     def __init__(
         self,
@@ -135,7 +135,7 @@ class D2FSequence(SequenceBase):
     ):
         super().__init__(token_ids, sampling_params)
         if config is None:
-            raise ValueError("SequenceForDiffusionLM requires a Config instance.")
+            raise ValueError("D2FReq requires a Config instance.")
         self.config = config
         self.kv_cache_layout = config.kv_cache_layout
         self.eos_token_id = config.eos
@@ -150,11 +150,11 @@ class D2FSequence(SequenceBase):
 
     def __repr__(self) -> str:
         return (
-            "SequenceForDiffusionLM(seq_id={seq_id}, status={status}, num_tokens={num_tokens}, "
+            "D2FReq(req_id={req_id}, status={status}, num_tokens={num_tokens}, "
             "num_prompt_tokens={num_prompt_tokens}, num_cached_tokens={num_cached_tokens}, "
             "diffusion_block_size={diffusion_block_size})"
         ).format(
-            seq_id=self.seq_id,
+            req_id=self.req_id,
             status=self.status.name,
             num_tokens=self.num_tokens,
             num_prompt_tokens=self.num_prompt_tokens,
@@ -182,15 +182,15 @@ class D2FSequence(SequenceBase):
             )
 
         state = {
-            "seq_id": self.seq_id,
+            "req_id": self.req_id,
             "status": self.status,
             "token_ids": self.token_ids,
             "last_token": self.last_token,
             "num_tokens": self.num_tokens,
             "num_prompt_tokens": self.num_prompt_tokens,
             "num_cached_tokens": self.num_cached_tokens,
-            "block_table": self.block_table,
-            "block_cache_missed": self.block_cache_missed,
+            "block_table": self.page_table,
+            "block_cache_missed": self.page_cache_missed,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "ignore_eos": self.ignore_eos,
@@ -211,15 +211,15 @@ class D2FSequence(SequenceBase):
         return state
 
     def __setstate__(self, state):
-        self.seq_id = state["seq_id"]
+        self.req_id = state.get("req_id", state.get("seq_id"))
         self.status = state["status"]
         self.token_ids = state["token_ids"]
         self.last_token = state["last_token"]
         self.num_tokens = state["num_tokens"]
         self.num_prompt_tokens = state["num_prompt_tokens"]
         self.num_cached_tokens = state["num_cached_tokens"]
-        self.block_table = state["block_table"]
-        self.block_cache_missed = state["block_cache_missed"]
+        self.page_table = state["block_table"]
+        self.page_cache_missed = state["block_cache_missed"]
         self.temperature = state["temperature"]
         self.max_tokens = state["max_tokens"]
         self.ignore_eos = state["ignore_eos"]
@@ -256,7 +256,7 @@ class D2FSequence(SequenceBase):
                 accept_threshold=block_state.get("accept_threshold", 0.95),
                 add_new_block_threshold=block_state.get("add_new_block_threshold", 0.1),
                 complete_threshold=block_state.get("complete_threshold", 0.9),
-                seq=self,
+                req=self,
                 pre_block=pre_block,
             )
             if pre_block is not None:
@@ -286,11 +286,11 @@ class D2FSequence(SequenceBase):
 
     @property
     def num_prompt_blocks(self) -> int:
-        return (self.input_num_prompt_tokens + self.block_size - 1) // self.block_size
+        return (self.input_num_prompt_tokens + self.page_size - 1) // self.page_size
 
     @property
     def last_block_prompt_num_tokens(self) -> int:
-        return self.input_num_prompt_tokens - (self.num_prompt_blocks - 1) * self.block_size
+        return self.input_num_prompt_tokens - (self.num_prompt_blocks - 1) * self.page_size
 
     @property
     def updated_or_updating_kv_cache_block_ids(self) -> list[int]:
@@ -342,7 +342,7 @@ class D2FSequence(SequenceBase):
 
     @property
     def num_cached_blocks(self) -> int:
-        return (self.num_cached_tokens + self.block_size - 1) // self.block_size
+        return (self.num_cached_tokens + self.page_size - 1) // self.page_size
 
     @property
     def diffusion_num_tokens(self) -> int:
@@ -351,9 +351,9 @@ class D2FSequence(SequenceBase):
     @property
     def mem_block_to_diffusion_blocks_map(self) -> list[list[int]]:
         mapping = []
-        for block_id in range(self.num_blocks):
-            window_start = block_id * self.block_size
-            window_length = self.block_size if block_id < self.num_blocks - 1 else self.last_block_num_tokens
+        for block_id in range(self.num_pages):
+            window_start = block_id * self.page_size
+            window_length = self.page_size if block_id < self.num_pages - 1 else self.last_block_num_tokens
             mapping.append(
                 [self.token_to_diffusion_block_id(token_id) for token_id in range(window_start, window_start + window_length)]
             )
@@ -420,7 +420,7 @@ class D2FSequence(SequenceBase):
                     add_new_block_threshold=self.config.add_new_block_threshold,
                     complete_threshold=self.config.complete_threshold,
                     is_prompt=True,
-                    seq=self,
+                    req=self,
                 )
             )
 
@@ -442,7 +442,7 @@ class D2FSequence(SequenceBase):
                 accept_threshold=self.config.accept_threshold,
                 add_new_block_threshold=self.config.add_new_block_threshold,
                 complete_threshold=self.config.complete_threshold,
-                seq=self,
+                req=self,
                 pre_block=self.diffusion_blocks[-1],
             )
             self.diffusion_blocks[-1].suf_block = current_block

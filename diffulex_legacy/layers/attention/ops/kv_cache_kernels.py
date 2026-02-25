@@ -9,14 +9,14 @@ from einops import rearrange
 from diffulex_legacy.utils.context import ContextForDiffusionLM 
 from diffulex_legacy.engine.sequence import SequenceForDiffusionLM
 from diffulex.utils.kv_cache_dtype import (
-    KvCacheDType,
+    kv_cacheDType,
     ensure_scale_tensor,
     parse_kv_cache_dtype,
     view_fp8_cache,
 )
 
 @triton.jit
-def store_kvcache_kernel_causal_lm(
+def store_kv_cache_kernel_causal_lm(
     key_ptr,
     key_stride,
     value_ptr,
@@ -58,7 +58,7 @@ def store_kvcache_kernel_causal_lm(
     
 
 @triton.jit
-def store_kvcache_kernel_diffusion_lm(
+def store_kv_cache_kernel_diffusion_lm(
     key_ptr,
     key_stride,
     value_ptr,
@@ -101,7 +101,7 @@ def store_kvcache_kernel_diffusion_lm(
 
 
 @triton.jit
-def store_kvcache_kernel_diffusion_lm_distinct(
+def store_kv_cache_kernel_diffusion_lm_distinct(
     k_ptr, v_ptr, k_cache_ptr, v_cache_ptr, slot_mapping_ptr,
     k_stride, v_stride,  
     k_cache_stride_nblks, k_cache_stride_h, k_cache_stride_dx, k_cache_stride_blk_sz, k_cache_stride_x,
@@ -166,7 +166,7 @@ def store_kvcache_kernel_diffusion_lm_distinct(
     tl.store(v_cache_ptr + v_cache_offs, v)
     
 
-def store_kvcache_distinct_layout(key: torch.Tensor, value: torch.Tensor, 
+def store_kv_cache_distinct_layout(key: torch.Tensor, value: torch.Tensor, 
                                   k_cache: torch.Tensor, v_cache: torch.Tensor, 
                                   slot_mapping: torch.Tensor, model_type: str = 'causal_lm',
                                   kv_cache_dtype: str = "bf16",
@@ -188,7 +188,7 @@ def store_kvcache_distinct_layout(key: torch.Tensor, value: torch.Tensor,
         v_cache_view = view_fp8_cache(v_cache, kv_cache_dtype)
         k_scale_ts = ensure_scale_tensor(k_scale, num_kv_heads=num_heads, device=key.device)
         v_scale_ts = ensure_scale_tensor(v_scale, num_kv_heads=num_heads, device=key.device)
-        store_kvcache_kernel_causal_lm[(N,)](
+        store_kv_cache_kernel_causal_lm[(N,)](
             key, key.stride(0),
             value, value.stride(0),
             k_cache_view, v_cache_view, slot_mapping,
@@ -214,7 +214,7 @@ def store_kvcache_distinct_layout(key: torch.Tensor, value: torch.Tensor,
         v_scale_ts = ensure_scale_tensor(v_scale, num_kv_heads=NHeads, device=key.device)
         
         GRID = (N, )
-        store_kvcache_kernel_diffusion_lm_distinct[GRID](
+        store_kv_cache_kernel_diffusion_lm_distinct[GRID](
             key, value,
             k_cache_view, v_cache_view,
             slot_mapping,
@@ -230,7 +230,7 @@ def store_kvcache_distinct_layout(key: torch.Tensor, value: torch.Tensor,
         )
 
 
-def store_kvcache_unified_layout(key: torch.Tensor, value: torch.Tensor, 
+def store_kv_cache_unified_layout(key: torch.Tensor, value: torch.Tensor, 
                                  k_cache: torch.Tensor, v_cache: torch.Tensor, 
                                  slot_mapping: torch.Tensor, model_type: str = 'causal_lm', 
                                  kv_cache_dtype: str = "bf16",
@@ -250,7 +250,7 @@ def store_kvcache_unified_layout(key: torch.Tensor, value: torch.Tensor,
     v_scale_ts = ensure_scale_tensor(v_scale, num_kv_heads=num_heads, device=key.device)
 
     if model_type == 'causal_lm':
-        store_kvcache_kernel_causal_lm[(N,)](
+        store_kv_cache_kernel_causal_lm[(N,)](
             key, key.stride(0),
             value, value.stride(0),
             k_cache_view, v_cache_view, slot_mapping,
@@ -262,7 +262,7 @@ def store_kvcache_unified_layout(key: torch.Tensor, value: torch.Tensor,
             float(spec.fp8_max or 0.0),
         )
     elif model_type == 'diffusion_lm':
-        store_kvcache_kernel_diffusion_lm[(N,)](
+        store_kv_cache_kernel_diffusion_lm[(N,)](
             key, key.stride(0),
             value, value.stride(0),
             k_cache_view, v_cache_view, slot_mapping,
@@ -276,7 +276,7 @@ def store_kvcache_unified_layout(key: torch.Tensor, value: torch.Tensor,
         
 
 @triton.jit
-def load_kvcache_kernel_kv(k_cache_ptr, v_cache_ptr,
+def load_kv_cache_kernel_kv(k_cache_ptr, v_cache_ptr,
                            k_new_ptr, v_new_ptr,
                            block_table_ptr,
                            k_out_ptr, v_out_ptr, 
@@ -426,7 +426,7 @@ def load_kvcache_kernel_kv(k_cache_ptr, v_cache_ptr,
                 tl.store(v_out_ptr + offs_cur_kv_new_to_out, v_new)
 
 
-def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
+def load_kv_cache(k_cache: torch.Tensor, v_cache: torch.Tensor,
                  context: ContextForDiffusionLM,
                  k_new: torch.Tensor, v_new: torch.Tensor,
                  kv_cache_dtype: str = "bf16",
@@ -459,23 +459,23 @@ def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
     out_dtype = k_new.dtype if out_dtype is None else out_dtype
     
     # Determine OUT_DTYPE for kernel (constexpr int)
-    from diffulex.utils.kv_cache_dtype import KvCacheDType
+    from diffulex.utils.kv_cache_dtype import kv_cacheDType
     if out_dtype == torch.bfloat16:
-        out_dtype_enum = int(KvCacheDType.BF16)  # 0
+        out_dtype_enum = int(kv_cacheDType.BF16)  # 0
     elif out_dtype == torch.float16:
-        out_dtype_enum = int(KvCacheDType.FP16)  # 1
+        out_dtype_enum = int(kv_cacheDType.FP16)  # 1
     elif out_dtype == torch.float32:
-        out_dtype_enum = int(KvCacheDType.FP32)  # 2
+        out_dtype_enum = int(kv_cacheDType.FP32)  # 2
     elif spec.is_fp8 and out_dtype == spec.fp8_view_dtype:
         out_dtype_enum = int(spec.enum)  # 3 or 4
     else:
         # Default: use k_new.dtype
         if k_new.dtype == torch.bfloat16:
-            out_dtype_enum = int(KvCacheDType.BF16)
+            out_dtype_enum = int(kv_cacheDType.BF16)
         elif k_new.dtype == torch.float16:
-            out_dtype_enum = int(KvCacheDType.FP16)
+            out_dtype_enum = int(kv_cacheDType.FP16)
         elif k_new.dtype == torch.float32:
-            out_dtype_enum = int(KvCacheDType.FP32)
+            out_dtype_enum = int(kv_cacheDType.FP32)
         else:
             raise ValueError(f"Unsupported out_dtype: {out_dtype}")
     
@@ -485,7 +485,7 @@ def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
     v_scale_ts = ensure_scale_tensor(v_scale, num_kv_heads=H_KV, device=k_cache.device)
     
     GRID = (NUM_SEQS, MAX_SEQ_BLOCKS, H_KV)
-    load_kvcache_kernel_kv[GRID](
+    load_kv_cache_kernel_kv[GRID](
         k_cache_view, v_cache_view,
         k_new, v_new,
         context.block_tables,

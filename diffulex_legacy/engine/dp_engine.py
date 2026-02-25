@@ -45,8 +45,8 @@ def _dp_child_entry(config: Config, dp_idx: int, local_devices: list[int], conn)
             master_port=int(config.master_port) + dp_idx,
             shm_name=f"{config.shm_name}_{dp_idx}",
             enforce_eager=config.enforce_eager,
-            kvcache_block_size=config.kvcache_block_size,
-            num_kvcache_blocks=config.num_kvcache_blocks,
+            kv_cache_block_size=config.kv_cache_block_size,
+            num_kv_cache_blocks=config.num_kv_cache_blocks,
             k_cache_hdim_split_factor_x=config.k_cache_hdim_split_factor_x,
             kv_cache_layout=config.kv_cache_layout,
         )

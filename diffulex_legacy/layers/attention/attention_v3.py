@@ -8,14 +8,14 @@ from typing import List, Tuple
 from functools import lru_cache, partial
 from einops import rearrange
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
-from flash_attn import flash_attn_with_kvcache
+from flash_attn import flash_attn_with_kv_cache
 
 from diffulex_legacy.layers.attention.ops import causal_lm_flash_decoding
 from diffulex_legacy.utils.context import ContextForDiffusionLM, get_context_causal_lm, get_context_diffusion_lm
 
 
 @triton.jit
-def store_kvcache_kernel(key_ptr,
+def store_kv_cache_kernel(key_ptr,
                          key_stride,
                          value_ptr,
                          value_stride,
@@ -34,7 +34,7 @@ def store_kvcache_kernel(key_ptr,
     tl.store(v_cache_ptr + cache_offsets, value)
 
 
-def store_kvcache(key: torch.Tensor, value: torch.Tensor, 
+def store_kv_cache(key: torch.Tensor, value: torch.Tensor, 
                   k_cache: torch.Tensor, v_cache: torch.Tensor, 
                   slot_mapping: torch.Tensor, model_type: str = 'causal_lm') -> None:
     N, num_heads, head_dim = key.shape
@@ -46,7 +46,7 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor,
     N = slot_mapping.numel() if model_type == 'diffusion_lm' else N
     assert N == slot_mapping.numel()
 
-    store_kvcache_kernel[(N,)](
+    store_kv_cache_kernel[(N,)](
         key, key.stride(0),
         value, value.stride(0),
         k_cache, v_cache, slot_mapping, D
@@ -54,7 +54,7 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor,
 
 
 @triton.jit
-def load_kvcache_kernel_kv_both(k_cache_ptr, v_cache_ptr,
+def load_kv_cache_kernel_kv_both(k_cache_ptr, v_cache_ptr,
                                 k_new_ptr, v_new_ptr,
                                 block_table_ptr,
                                 k_out_ptr, v_out_ptr, 
@@ -145,7 +145,7 @@ def load_kvcache_kernel_kv_both(k_cache_ptr, v_cache_ptr,
                 tl.store(v_new_out_ptrs, v_new)
             
 
-def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
+def load_kv_cache(k_cache: torch.Tensor, v_cache: torch.Tensor,
                  context: ContextForDiffusionLM,
                  k_new: torch.Tensor, v_new: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     assert k_cache.shape == v_cache.shape
@@ -167,7 +167,7 @@ def load_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor,
     v_output = torch.empty_like(k_output)
     
     GRID = (NUM_SEQS, MAX_SEQ_BLOCKS, H_KV)
-    load_kvcache_kernel_kv_both[GRID](
+    load_kv_cache_kernel_kv_both[GRID](
         k_cache, v_cache,
         k_new, v_new,
         context.block_tables,
@@ -268,7 +268,7 @@ class Attention(nn.Module):
         # Fast Store KV cache
         if k_cache.numel() and v_cache.numel():
             if not (self.model_type == 'diffusion_lm' and context.slot_mapping.numel() == 0):
-                store_kvcache(k, v, k_cache, v_cache, context.slot_mapping, self.model_type)
+                store_kv_cache(k, v, k_cache, v_cache, context.slot_mapping, self.model_type)
 
         transpose_fn = lambda x: rearrange(x, 's h d -> 1 h s d').contiguous()
         # Prefill / Decode logic
@@ -296,7 +296,7 @@ class Attention(nn.Module):
                 q_t = transpose_fn(q)
 
                 # Fast Load KV cache  
-                k_comb, v_comb = load_kvcache(self.k_cache, self.v_cache, context, k, v)
+                k_comb, v_comb = load_kv_cache(self.k_cache, self.v_cache, context, k, v)
 
                 k_t, v_t = transpose_fn(k_comb), transpose_fn(v_comb)
 

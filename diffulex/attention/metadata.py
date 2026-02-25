@@ -3,9 +3,11 @@ import torch
 from typing import Callable
 from dataclasses import dataclass
 
+from diffulex.mixin.multi_block.attention.metadata import MultiBlockAttnMetaDataMixin
+
 
 @dataclass
-class AttnMetaDataBase:
+class AttnMetaDataBase(MultiBlockAttnMetaDataMixin):
     is_prefill: bool = False
     cu_seqlens_q: torch.Tensor | None = None
     cu_seqlens_k: torch.Tensor | None = None
@@ -13,18 +15,28 @@ class AttnMetaDataBase:
     max_seqlen_k: int = 0
     slot_mapping: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
-    block_tables: torch.Tensor | None = None
-    page_block_size: int = 32
+    page_tables: torch.Tensor | None = None
+    page_size: int = 32
     attn_type: str = "block_attention"
     diffusion_block_size: int = 32
     decode_mode: str = "static"
+    kv_cache_layout: str = "unified"
+    
     k_scale: torch.Tensor | None = None  # Quantization scale for K cache, shape [num_kv_heads]
     v_scale: torch.Tensor | None = None  # Quantization scale for V cache, shape [num_kv_heads]
     q_scale: torch.Tensor | None = None  # Quantization scale for Q, strategy-defined shape (e.g. [num_heads] or [1])
     
     @property
-    def num_seqs(self) -> int:
+    def num_reqs(self) -> int:
         return len(self.cu_seqlens_q) - 1
+    
+    @property
+    def chunk_size(self) -> int:
+        return self.diffusion_block_size * self.buffer_size
+    
+    @property
+    def need_kv_cache_store(self) -> bool:
+        return self.slot_mapping is not None and (self.slot_mapping >= 0).any()
 
 FN_TYPE_AttnMetaDataFetch = Callable[[], AttnMetaDataBase]
 

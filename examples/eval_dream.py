@@ -637,7 +637,7 @@ class DreamLoRA(LM):
                 cache_length = 0 if past_key_values is None else past_key_values.get_seq_length()
                 
                 # determine需要添加到缓存的内容
-                update_kvcache = 0
+                update_kv_cache = 0
                 if blocks_to_cache:
                     # 找到最早需要缓存的块
                     earliest_block_id = min(blocks_to_cache)
@@ -648,12 +648,12 @@ class DreamLoRA(LM):
                     latest_pos = block_states[latest_block_id]['end_pos']
                     
                     # 更新这个范围内所有块的缓存
-                    update_kvcache = latest_pos - earliest_pos
+                    update_kv_cache = latest_pos - earliest_pos
                 
                 # build input sequence for forward pass
                 process_start_pos = cache_length
                 
-                if update_kvcache > 0:
+                if update_kv_cache > 0:
                     # 需要更新缓存 - 使用已完成的块
                     earliest_block_to_cache = min(blocks_to_cache)
                     input_seq = x_t[:, block_states[earliest_block_to_cache]['start_pos']:]
@@ -702,13 +702,13 @@ class DreamLoRA(LM):
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=True,
-                    update_kvcache=update_kvcache,
+                    update_kv_cache=update_kv_cache,
                 )
                 
                 # update cache if needed
-                if update_kvcache > 0:
+                if update_kv_cache > 0:
                     # store last logits for next token prediction
-                    cache_end_idx = update_kvcache - 1
+                    cache_end_idx = update_kv_cache - 1
                     last_logits = outputs.logits[:, cache_end_idx, :].unsqueeze(1)
                     
                     # update past_key_values

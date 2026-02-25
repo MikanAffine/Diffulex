@@ -21,7 +21,7 @@ def _build_cu_seqlens(lengths: torch.Tensor) -> torch.Tensor:
     )
 
 
-def naive_sdpa_with_kvcache(
+def naive_sdpa_with_kv_cache(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -138,7 +138,7 @@ def test_paged_decode_triton_bf16_cache_matches_reference():
     scale = 1.0 / (head_dim**0.5)
 
     out = paged_attn_decode_unified_triton(q, k, v, k_cache, v_cache, md, softmax_scale=scale, fp8_cache=False)
-    ref = naive_sdpa_with_kvcache(
+    ref = naive_sdpa_with_kv_cache(
         q,
         k,
         v,
@@ -221,7 +221,7 @@ def test_paged_decode_triton_fp8_cache_matches_reference():
     # Reference uses dequantized cache.
     k_cache_deq = (k_cache_fp8.float() * k_scale.view(1, 1, -1, 1)).to(torch.bfloat16)
     v_cache_deq = (v_cache_fp8.float() * v_scale.view(1, 1, -1, 1)).to(torch.bfloat16)
-    ref = naive_sdpa_with_kvcache(
+    ref = naive_sdpa_with_kv_cache(
         q,
         k,
         v,

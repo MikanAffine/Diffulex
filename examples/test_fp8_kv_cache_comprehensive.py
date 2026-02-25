@@ -46,9 +46,9 @@ sys.path.insert(0, PROJECT_ROOT)
 # 导入必要的模块
 from vllm.platforms import current_platform
 from diffulex_legacy.layers.attention.ops import (
-    store_kvcache_unified_layout, 
-    store_kvcache_distinct_layout, 
-    load_kvcache
+    store_kv_cache_unified_layout, 
+    store_kv_cache_distinct_layout, 
+    load_kv_cache
 )
 from diffulex_legacy.layers.attention.attention_v4 import Attention
 from diffulex_legacy.utils.context import (
@@ -158,7 +158,7 @@ def test_kv_cache_fp8_unified_roundtrip():
     k_scale = (k_absmax / fp8_max).clamp_min(eps)
     v_scale = (v_absmax / fp8_max).clamp_min(eps)
 
-    store_kvcache_unified_layout(
+    store_kv_cache_unified_layout(
         k_all, v_all, k_cache_u8, v_cache_u8, slot_mapping_ts,
         model_type="diffusion_lm",
         kv_cache_dtype="fp8_e4m3",
@@ -204,7 +204,7 @@ def test_kv_cache_fp8_unified_roundtrip():
         cu_seqlens_k=cu_seqlens_k,
     )
 
-    k_out, v_out = load_kvcache(
+    k_out, v_out = load_kv_cache(
         k_cache_u8, v_cache_u8, ctx, k_new, v_new,
         kv_cache_dtype="fp8_e4m3",
         k_scale=k_scale,
@@ -265,7 +265,7 @@ def test_kv_cache_fp8_distinct_roundtrip():
     k_scale = (k_absmax / fp8_max).clamp_min(eps)
     v_scale = (v_absmax / fp8_max).clamp_min(eps)
 
-    store_kvcache_distinct_layout(
+    store_kv_cache_distinct_layout(
         k_all, v_all, k_cache_u8, v_cache_u8, slot_mapping_ts,
         model_type="diffusion_lm",
         kv_cache_dtype="fp8_e4m3",
@@ -487,11 +487,11 @@ def test_kv_cache_memory(kv_cache_dtype="bf16"):
         kv_cache_size_mb = kv_cache.element_size() * kv_cache.numel() / 1024**2
         
         config = model_runner.config
-        if hasattr(config, 'num_kvcache_blocks') and config.num_kvcache_blocks > 0:
+        if hasattr(config, 'num_kv_cache_blocks') and config.num_kv_cache_blocks > 0:
             hf_config = config.hf_config
             num_layers = hf_config.num_hidden_layers
-            block_size = config.kvcache_block_size
-            num_blocks = config.num_kvcache_blocks
+            block_size = config.kv_cache_block_size
+            num_blocks = config.num_kv_cache_blocks
             
             if hasattr(hf_config, 'head_dim'):
                 head_dim = hf_config.head_dim
