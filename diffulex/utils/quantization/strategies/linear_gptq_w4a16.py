@@ -36,7 +36,9 @@ def _build_linear_gptq_w4a16() -> LinearQuantizationStrategy:
 class LinearGPTQW4A16Strategy(LinearQuantizationStrategy):
     def __init__(self) -> None:
         super().__init__()
-        self._ops_available: bool = bool(ops is not None and hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "gptq_gemm"))
+        self._ops_available: bool = bool(
+            ops is not None and hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "gptq_gemm")
+        )
         # Cache empty g_idx tensor per device to avoid per-call allocations.
         self._empty_cache: dict[int, torch.Tensor] = {}
 
@@ -76,8 +78,7 @@ class LinearGPTQW4A16Strategy(LinearQuantizationStrategy):
         if quantized.is_floating_point():
             return quantized
         raise NotImplementedError(
-            "GPTQ dequantize is not implemented in Diffulex. "
-            "Use vLLM kernels via linear_forward."
+            "GPTQ dequantize is not implemented in Diffulex. Use vLLM kernels via linear_forward."
         )
 
     def linear_forward(
@@ -100,8 +101,7 @@ class LinearGPTQW4A16Strategy(LinearQuantizationStrategy):
         _ = quant_kind, weight, in_features, group_size
         if not self._ops_available:
             raise RuntimeError(
-                "vLLM is required for GPTQ W4A16 (missing `vllm._custom_ops`). "
-                "Please install/build vLLM with CUDA ops."
+                "vLLM is required for GPTQ W4A16 (missing `vllm._custom_ops`). Please install/build vLLM with CUDA ops."
             )
         qweight = gptq_qweight
         qzeros = gptq_qzeros
@@ -132,7 +132,11 @@ class LinearGPTQW4A16Strategy(LinearQuantizationStrategy):
                 self._empty_cache[dev_key] = empty
             g_idx_t = empty
         else:
-            g_idx_t = g_idx if (g_idx.device == device and g_idx.dtype == torch.int) else g_idx.to(device=device, dtype=torch.int)
+            g_idx_t = (
+                g_idx
+                if (g_idx.device == device and g_idx.dtype == torch.int)
+                else g_idx.to(device=device, dtype=torch.int)
+            )
 
         output = torch.ops._C.gptq_gemm(
             x2,
@@ -150,4 +154,3 @@ class LinearGPTQW4A16Strategy(LinearQuantizationStrategy):
         out_shape = x.shape[:-1] + (int(out_features) if out_features is not None else int(qweight.shape[-1]),)
         output = output.reshape(out_shape)
         return output.to(dtype=x.dtype) if output.dtype != x.dtype else output
-

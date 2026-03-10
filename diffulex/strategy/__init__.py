@@ -1,4 +1,5 @@
 """Diffulex strategy package that imports built-in strategies to trigger registration."""
+
 from __future__ import annotations
 import importlib
 from pathlib import Path
@@ -20,18 +21,22 @@ for item in _current_dir.iterdir():
             except Exception as e:
                 # Skip packages that fail to import
                 import warnings
+
                 warnings.warn(f"Failed to import strategy {item.name}: {e}", ImportWarning)
 
 __all__ = _strategy_modules.copy()
 
 DECODING_STRATEGY = None
 
+
 def fetch_decoding_strategy() -> str | None:
     return DECODING_STRATEGY
+
 
 def set_decoding_strategy(strategy: str) -> None:
     global DECODING_STRATEGY
     DECODING_STRATEGY = strategy
+
 
 def reset_decoding_strategy() -> None:
     global DECODING_STRATEGY

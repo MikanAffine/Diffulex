@@ -1,33 +1,22 @@
 import torch
 
-from typing import List
 from dataclasses import dataclass
 
 from diffulex.attention.metadata import AttnMetaDataBase
-from diffulex.strategy.d2f.engine.sequence import D2FSequence
 
 
 @dataclass
-class D2FAttnMetaData(AttnMetaDataBase):
-    seq_lens: list[int] = None
-    seq_lens_ts: torch.Tensor | None = None
-    seqs: List[D2FSequence] = None
-    kv_cache_layout: str = "unified"
-    need_kv_cache_store: bool = True
-    
+class D2fAttnMetaData(AttnMetaDataBase):
     def __post_init__(self):
-        if self.seq_lens_ts is not None and self.context_lens is not None:
-            self.total_lens = self.seq_lens_ts + self.context_lens
-    
-    @property
-    def total_num_seqs(self) -> int:
-        return len(self.seqs) if self.seqs is not None else 0
+        self.init_multi_block()
 
 
-D2F_ATTN_METADATA = D2FAttnMetaData()
+D2F_ATTN_METADATA = D2fAttnMetaData()
 
-def fetch_d2f_attn_metadata() -> D2FAttnMetaData:
+
+def fetch_d2f_attn_metadata() -> D2fAttnMetaData:
     return D2F_ATTN_METADATA
+
 
 def set_d2f_attn_metadata(
     is_prefill: bool = False,
@@ -37,18 +26,14 @@ def set_d2f_attn_metadata(
     max_seqlen_k: int = 0,
     slot_mapping: torch.Tensor | None = None,
     context_lens: torch.Tensor | None = None,
-    block_tables: torch.Tensor | None = None,
-    seqs: List[D2FSequence] | None = None,
-    seq_lens: list[int] | None = None,
-    seq_lens_ts: torch.Tensor | None = None,
+    page_tables: torch.Tensor | None = None,
+    page_size: int = 32,
+    block_size: int = 32,
+    decode_mode: str = "static",
     kv_cache_layout: str = "unified",
-    need_kv_cache_store: bool = True,
-    diffusion_block_size: int = 32,
-    decode_mode: str = "varlen",
-    attn_type: str = "full_attention",
 ) -> None:
     global D2F_ATTN_METADATA
-    D2F_ATTN_METADATA = D2FAttnMetaData(
+    D2F_ATTN_METADATA = D2fAttnMetaData(
         is_prefill=is_prefill,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
@@ -56,17 +41,14 @@ def set_d2f_attn_metadata(
         max_seqlen_k=max_seqlen_k,
         slot_mapping=slot_mapping,
         context_lens=context_lens,
-        block_tables=block_tables,
-        seq_lens=seq_lens,
-        seq_lens_ts=seq_lens_ts,
-        seqs=seqs,
+        page_tables=page_tables,
+        page_size=page_size,
+        block_size=block_size,
         kv_cache_layout=kv_cache_layout,
-        need_kv_cache_store=need_kv_cache_store,
-        diffusion_block_size=diffusion_block_size,
         decode_mode=decode_mode,
-        attn_type=attn_type,
     )
+
 
 def reset_d2f_attn_metadata() -> None:
     global D2F_ATTN_METADATA
-    D2F_ATTN_METADATA = D2FAttnMetaData()
+    D2F_ATTN_METADATA = D2fAttnMetaData()

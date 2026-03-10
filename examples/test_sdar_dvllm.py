@@ -136,7 +136,6 @@ def main() -> None:
     # Build Config + load model weights using Diffulex loader.
     from diffulex.config import Config
     from diffulex.model.auto_model import AutoModelForDiffusionLM
-    import diffulex.model.sdar
 
     cfg = Config(
         model=str(model_dir),
@@ -207,5 +206,3 @@ if __name__ == "__main__":
     # Avoid tokenizer parallel warnings in multi-proc.
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     main()
-
-

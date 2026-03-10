@@ -40,4 +40,3 @@ if [ -f "CNAME" ]; then
 fi
 
 echo "Documentation build completed successfully!"
-

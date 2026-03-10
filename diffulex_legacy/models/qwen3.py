@@ -9,11 +9,14 @@ from diffulex_legacy.layers.activation import SiluAndMul
 from diffulex_legacy.layers.rotary_embedding import get_rope
 from diffulex_legacy.layers.attention.attention_v4 import Attention
 from diffulex_legacy.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-from diffulex_legacy.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from diffulex_legacy.layers.linear import (
+    QKVParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 
 
 class Qwen3Attention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -87,7 +90,6 @@ class Qwen3Attention(nn.Module):
 
 
 class Qwen3MLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -116,7 +118,6 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: Qwen3Config,
@@ -128,8 +129,8 @@ class Qwen3DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             max_position=config.max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=getattr(config, 'attention_bias', False),
-            head_dim=getattr(config, 'head_dim', None),
+            qkv_bias=getattr(config, "attention_bias", False),
+            head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
@@ -159,7 +160,6 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(nn.Module):
-
     def __init__(
         self,
         config: Qwen3Config,
@@ -191,10 +191,7 @@ class Qwen3ForCausalLM(nn.Module):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(
-        self,
-        config: Qwen3Config
-    ) -> None:
+    def __init__(self, config: Qwen3Config) -> None:
         super().__init__()
         self.model = Qwen3Model(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)

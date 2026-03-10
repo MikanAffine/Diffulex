@@ -1,3 +1,7 @@
+# Triton JIT kernels: Pyright may falsely report "unreachable" for code inside @triton.jit
+# decorated functions (the body is traced/compiled, not run as normal Python).
+# pyright: reportUnreachable=false
+
 import torch
 import triton
 import triton.language as tl
@@ -452,14 +456,17 @@ def _paged_decode_attn_unified_fp8_cache_fused_dot_kernel(
         )
 
         # acc += P @ V_true == (P @ V_fp8) * v_scale
-        acc += tl.dot_scaled(
-            p.to(tl.float16),
-            None,
-            "fp16",
-            v_blk,
-            None,
-            KV_FORMAT,
-        ) * v_scale
+        acc += (
+            tl.dot_scaled(
+                p.to(tl.float16),
+                None,
+                "fp16",
+                v_blk,
+                None,
+                KV_FORMAT,
+            )
+            * v_scale
+        )
         m = m_new
         l = l_new
 
@@ -523,8 +530,14 @@ def paged_attn_decode_unified_triton(
     """
     assert q.is_cuda and k.is_cuda and v.is_cuda and k_cache.is_cuda and v_cache.is_cuda
     assert q.dtype == torch.bfloat16 and k.dtype == torch.bfloat16 and v.dtype == torch.bfloat16
-    assert attn_metadata.block_tables is not None and attn_metadata.context_lens is not None and attn_metadata.cu_seqlens_q is not None
-    assert attn_metadata.kv_cache_layout == "unified", f"only unified layout supported, got {attn_metadata.kv_cache_layout}"
+    assert (
+        attn_metadata.block_tables is not None
+        and attn_metadata.context_lens is not None
+        and attn_metadata.cu_seqlens_q is not None
+    )
+    assert attn_metadata.kv_cache_layout == "unified", (
+        f"only unified layout supported, got {attn_metadata.kv_cache_layout}"
+    )
 
     # Be robust to different metadata implementations (dataclass vs SimpleNamespace in tests).
     num_seqs = int(attn_metadata.cu_seqlens_q.numel() - 1)
@@ -534,7 +547,7 @@ def paged_attn_decode_unified_triton(
     assert num_heads % num_kv_heads == 0
     num_groups = num_heads // num_kv_heads
 
-    page_size = int(attn_metadata.page_block_size)
+    page_size = int(attn_metadata.page_size)
 
     # Heuristics: BLOCK_M = 64 (supports diffusion_block_size=32/64), BLOCK_N = page_size/new-tile
     BLOCK_M = 64
@@ -568,16 +581,23 @@ def paged_attn_decode_unified_triton(
                 raise ValueError(f"Unsupported fp8 k_cache dtype for fused-dot: {k_cache.dtype}")
             try:
                 _paged_decode_attn_unified_fp8_cache_fused_dot_kernel[grid](
-                    q, k, v,
-                    k_cache, v_cache,
-                    attn_metadata.k_scale, attn_metadata.v_scale,
+                    q,
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                    attn_metadata.k_scale,
+                    attn_metadata.v_scale,
                     attn_metadata.block_tables,
                     attn_metadata.context_lens,
                     attn_metadata.cu_seqlens_q,
                     o,
                     softmax_scale,
-                    *q.stride(), *k.stride(), *o.stride(),
-                    *k_cache.stride(), *v_cache.stride(),
+                    *q.stride(),
+                    *k.stride(),
+                    *o.stride(),
+                    *k_cache.stride(),
+                    *v_cache.stride(),
                     *attn_metadata.block_tables.stride(),
                     KV_FORMAT=kv_format,
                     NUM_GROUPS=num_groups,
@@ -593,16 +613,23 @@ def paged_attn_decode_unified_triton(
                 if strict_fused:
                     raise
                 _paged_decode_attn_unified_fp8_cache_kernel_legacy[grid](
-                    q, k, v,
-                    k_cache, v_cache,
-                    attn_metadata.k_scale, attn_metadata.v_scale,
+                    q,
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                    attn_metadata.k_scale,
+                    attn_metadata.v_scale,
                     attn_metadata.block_tables,
                     attn_metadata.context_lens,
                     attn_metadata.cu_seqlens_q,
                     o,
                     softmax_scale,
-                    *q.stride(), *k.stride(), *o.stride(),
-                    *k_cache.stride(), *v_cache.stride(),
+                    *q.stride(),
+                    *k.stride(),
+                    *o.stride(),
+                    *k_cache.stride(),
+                    *v_cache.stride(),
                     *attn_metadata.block_tables.stride(),
                     NUM_GROUPS=num_groups,
                     HEAD_DIM=head_dim,
@@ -615,16 +642,23 @@ def paged_attn_decode_unified_triton(
                 )
         else:
             _paged_decode_attn_unified_fp8_cache_kernel_legacy[grid](
-                q, k, v,
-                k_cache, v_cache,
-                attn_metadata.k_scale, attn_metadata.v_scale,
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                attn_metadata.k_scale,
+                attn_metadata.v_scale,
                 attn_metadata.block_tables,
                 attn_metadata.context_lens,
                 attn_metadata.cu_seqlens_q,
                 o,
                 softmax_scale,
-                *q.stride(), *k.stride(), *o.stride(),
-                *k_cache.stride(), *v_cache.stride(),
+                *q.stride(),
+                *k.stride(),
+                *o.stride(),
+                *k_cache.stride(),
+                *v_cache.stride(),
                 *attn_metadata.block_tables.stride(),
                 NUM_GROUPS=num_groups,
                 HEAD_DIM=head_dim,
@@ -637,15 +671,21 @@ def paged_attn_decode_unified_triton(
             )
     else:
         _paged_decode_attn_unified_bf16_cache_kernel[grid](
-            q, k, v,
-            k_cache, v_cache,
+            q,
+            k,
+            v,
+            k_cache,
+            v_cache,
             attn_metadata.block_tables,
             attn_metadata.context_lens,
             attn_metadata.cu_seqlens_q,
             o,
             softmax_scale,
-            *q.stride(), *k.stride(), *o.stride(),
-            *k_cache.stride(), *v_cache.stride(),
+            *q.stride(),
+            *k.stride(),
+            *o.stride(),
+            *k_cache.stride(),
+            *v_cache.stride(),
             *attn_metadata.block_tables.stride(),
             NUM_GROUPS=num_groups,
             HEAD_DIM=head_dim,
@@ -658,4 +698,3 @@ def paged_attn_decode_unified_triton(
         )
 
     return o
-

@@ -63,7 +63,3 @@ class LinearStubStrategy(LinearQuantizationStrategy):
             "Linear quantization kernel is not implemented yet. "
             f"kind={quant_kind!r}, weight_dtype={self.weight_dtype!r}, act_dtype={self.act_dtype!r}"
         )
-
-
-
-

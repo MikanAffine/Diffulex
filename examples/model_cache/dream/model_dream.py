@@ -9,11 +9,9 @@
 # Pricing
 
 
-
-
 # Dream-org
 # /
-# Dream-v0-Instruct-7B 
+# Dream-v0-Instruct-7B
 
 # like
 # 94
@@ -73,8 +71,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch Dream model."""
-from transformers import Qwen2Model
-from torch.nn.attention.flex_attention import flex_attention
+
 import math
 from typing import List, Optional, Tuple, Union
 import os
@@ -85,30 +82,29 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_outputs import (
-    BaseModelOutput,
     MaskedLMOutput,
     BaseModelOutputWithPast,
-    CausalLMOutputWithPast
+    CausalLMOutputWithPast,
 )
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
     is_flash_attn_2_available,
-    is_flash_attn_greater_or_equal_2_10,
     logging,
 )
 from transformers import PretrainedConfig
 from model_cache.dream.configuration_dream import DreamConfig
-from model_cache.dream.generation_utils import DreamGenerationMixin, DreamGenerationConfig
+from model_cache.dream.generation_utils import (
+    DreamGenerationMixin,
+    DreamGenerationConfig,
+)
+
 if is_flash_attn_2_available():
-    from transformers.modeling_flash_attention_utils import _flash_attention_forward
+    pass
 
 
 logger = logging.get_logger(__name__)
 
-from transformers import Qwen2ForCausalLM
 _CHECKPOINT_FOR_DOC = "Dream-7B"
 _CONFIG_FOR_DOC = "DreamConfig"
 
@@ -184,7 +180,6 @@ class DreamRotaryEmbedding(nn.Module):
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, self.inv_freq.device, **self.rope_kwargs)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
-    
 
     def _dynamic_frequency_update(self, position_ids, device):
         """
@@ -364,7 +359,11 @@ class DreamAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+            }  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
@@ -396,7 +395,7 @@ class DreamAttention(nn.Module):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
-    
+
 
 class DreamSdpaAttention(DreamAttention):
     """
@@ -410,7 +409,7 @@ class DreamSdpaAttention(DreamAttention):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        update_kvcache: torch.int32 = None,
+        update_kv_cache: torch.int32 = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
@@ -456,7 +455,11 @@ class DreamSdpaAttention(DreamAttention):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+            }  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -484,7 +487,7 @@ class DreamSdpaAttention(DreamAttention):
             value_states,
             attn_mask=attention_mask if attention_mask is not None else None,
             dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=False, # hard coded
+            is_causal=False,  # hard coded
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -493,7 +496,7 @@ class DreamSdpaAttention(DreamAttention):
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value
-    
+
 
 class DreamFlexAttention(DreamAttention):
     """
@@ -507,7 +510,7 @@ class DreamFlexAttention(DreamAttention):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        update_kvcache: torch.int32 = None,
+        update_kv_cache: torch.int32 = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
@@ -555,19 +558,28 @@ class DreamFlexAttention(DreamAttention):
         # print("k,v",key_states.shape,value_states.shape,past_key_value)
         # print(cos.shape,sin.shape,cache_position.shape)
         if past_key_value is not None:
-            if update_kvcache == 0:
+            if update_kv_cache == 0:
                 past_key_states, past_value_states = past_key_value[self.layer_idx]
-                key_states=torch.cat([past_key_states, key_states], dim=2)
-                value_states=torch.cat([past_value_states, value_states], dim=2)
-  # Specific to RoPE models
+                key_states = torch.cat([past_key_states, key_states], dim=2)
+                value_states = torch.cat([past_value_states, value_states], dim=2)
+            # Specific to RoPE models
             else:
-                cache_kwargs = {"sin": sin[:,:update_kvcache,:], "cos": cos[:,:update_kvcache,:], "cache_position": cache_position[:update_kvcache]}
-                # print("update_kvcache",update_kvcache)
-                new_key_states, new_value_states = past_key_value.update(key_states[:,:,:update_kvcache, :], value_states[:,:,:update_kvcache, : ], self.layer_idx, cache_kwargs)
+                cache_kwargs = {
+                    "sin": sin[:, :update_kv_cache, :],
+                    "cos": cos[:, :update_kv_cache, :],
+                    "cache_position": cache_position[:update_kv_cache],
+                }
+                # print("update_kv_cache",update_kv_cache)
+                new_key_states, new_value_states = past_key_value.update(
+                    key_states[:, :, :update_kv_cache, :],
+                    value_states[:, :, :update_kv_cache, :],
+                    self.layer_idx,
+                    cache_kwargs,
+                )
                 # print("new_kv",new_key_states.shape,new_value_states.shape)
                 # print("k,v",new_key_states.shape,new_value_states.shape)
-                key_states = torch.cat([new_key_states, key_states[:,:,update_kvcache:,:]], dim=2)
-                value_states = torch.cat([new_value_states,value_states[:,:,update_kvcache:,:]], dim=2)
+                key_states = torch.cat([new_key_states, key_states[:, :, update_kv_cache:, :]], dim=2)
+                value_states = torch.cat([new_value_states, value_states[:, :, update_kv_cache:, :]], dim=2)
                 # print("k,v",key_states.shape,value_states.shape)
         # print(key_states.shape,value_states.shape)
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -575,17 +587,17 @@ class DreamFlexAttention(DreamAttention):
 
         # causal_mask = attention_mask
         if attention_mask is not None:  # no matter the length, we just slice it
-            atte_mask = attention_mask[:,:, :, : key_states.shape[-2]].clone()
-            # print(update_kvcache,attention_mask.shape)
+            atte_mask = attention_mask[:, :, :, : key_states.shape[-2]].clone()
+            # print(update_kv_cache,attention_mask.shape)
             # if attention_mask.shape[3]>86+32:
             # if attention_mask.shape[-1]!=attention_mask.shape[-2]:
-            #     atte_mask[:,:,:update_kvcache,-update_kvcache:]=-torch.inf
-            
-            # if update_kvcache > 0:
+            #     atte_mask[:,:,:update_kv_cache,-update_kv_cache:]=-torch.inf
+
+            # if update_kv_cache > 0:
             #     print("attention_mask中出现过的值",atte_mask.unique())
-                # print('tTTTTTTTTT')
+            # print('tTTTTTTTTT')
             # print("-"*20)
-            # print("attention_mask",attention_mask,update_kvcache)
+            # print("attention_mask",attention_mask,update_kv_cache)
             # print(attention_mask)
             # exit()
             # print(attention_mask[0,0,:,:],attention_mask[0,0,:,:].shape)
@@ -620,7 +632,7 @@ class DreamFlexAttention(DreamAttention):
             value_states,
             attn_mask=atte_mask if attention_mask is not None else None,
             dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=False, # hard coded
+            is_causal=False,  # hard coded
         )
         # print("attn_output",attn_output[:,:,:84,:],attn_output.shape)
         # print(atte_mask[:,:,:84,:84],attenti_mask.shape)
@@ -635,6 +647,7 @@ class DreamFlexAttention(DreamAttention):
 
         return attn_output, None, past_key_value
 
+
 class DreamDecoderLayer(nn.Module):
     def __init__(self, config: DreamConfig, layer_idx: int):
         super().__init__()
@@ -645,7 +658,7 @@ class DreamDecoderLayer(nn.Module):
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
                 "unexpected results may be encountered."
             )
-        
+
         # self.self_attn = Dream_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
         self.self_attn = DreamFlexAttention(config, layer_idx)
 
@@ -656,7 +669,7 @@ class DreamDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        update_kvcache: torch.int32 = None,
+        update_kv_cache: torch.int32 = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
@@ -696,7 +709,7 @@ class DreamDecoderLayer(nn.Module):
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            update_kvcache=update_kvcache,
+            update_kv_cache=update_kv_cache,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
@@ -721,6 +734,7 @@ class DreamDecoderLayer(nn.Module):
             outputs += (present_key_value,)
 
         return outputs
+
 
 class DreamPreTrainedModel(PreTrainedModel):
     config_class = DreamConfig
@@ -776,7 +790,7 @@ class DreamPreTrainedModel(PreTrainedModel):
             **kwargs,
         )
         # NOTE(Lin): we need to override the generation config
-        # because the generation config loaded in `from_pretrained` 
+        # because the generation config loaded in `from_pretrained`
         # does not include all the attributes of DreamGenerationConfig
         resume_download = kwargs.get("resume_download", None)
         proxies = kwargs.get("proxies", None)
@@ -797,6 +811,7 @@ class DreamPreTrainedModel(PreTrainedModel):
             _from_pipeline=from_pipeline,
         )
         return _model
+
 
 class DreamBaseModel(DreamPreTrainedModel):
     """
@@ -831,7 +846,7 @@ class DreamBaseModel(DreamPreTrainedModel):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
-        update_kvcache: torch.int32 = None,
+        update_kv_cache: torch.int32 = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -865,14 +880,16 @@ class DreamBaseModel(DreamPreTrainedModel):
             # input_ids = input_ids[:, past_seen_tokens:]
             inputs_embeds = self.embed_tokens(input_ids)
             # print("inputs_embeds",inputs_embeds.shape)
-        
+
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache()
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
 
         if position_ids is None:
@@ -907,7 +924,7 @@ class DreamBaseModel(DreamPreTrainedModel):
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
-                    update_kvcache=update_kvcache,
+                    update_kv_cache=update_kv_cache,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
@@ -976,7 +993,7 @@ class DreamModel(DreamGenerationMixin, DreamPreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        update_kvcache: torch.int32 = None,
+        update_kv_cache: torch.int32 = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -999,7 +1016,7 @@ class DreamModel(DreamGenerationMixin, DreamPreTrainedModel):
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            update_kvcache=update_kvcache,
+            update_kv_cache=update_kv_cache,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,

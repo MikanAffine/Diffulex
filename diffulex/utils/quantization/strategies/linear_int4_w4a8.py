@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import torch
-import torch.nn.functional as F
 
 from diffulex.utils.quantization.registry import register_linear_strategy
 from diffulex.utils.quantization.strategy import LinearQuantizationStrategy
@@ -74,4 +73,3 @@ class LinearInt4W4A8Strategy(LinearQuantizationStrategy):
             )
         # Correctness-first: reuse W4A16 implementation.
         return self._w4a16.linear_forward(x, weight, bias, quant_kind="other", **kwargs)
-

@@ -26,4 +26,3 @@ class LinearInt8W8A16Strategy(LinearMarlinInt8W8A16Strategy):
 def _build_linear_int8_w8a16() -> LinearQuantizationStrategy:
     # Alias to marlin(AllSpark) W8A16 implementation.
     return LinearInt8W8A16Strategy()
-

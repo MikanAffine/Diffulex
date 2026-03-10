@@ -12,7 +12,6 @@ from diffulex_legacy.layers.linear import RowParallelLinear, ColumnParallelLinea
 from diffulex_legacy.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
 
-
 if os.environ.get("TRITON_INTERPRET", None) == "1":
     torch._dynamo.reset()
     torch._dynamo.config.suppress_errors = True
@@ -26,6 +25,7 @@ class DreamRMSNorm(RMSNorm):
 
 class DreamAttention(nn.Module):
     """Dream attention mechanism."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -90,12 +90,12 @@ class DreamAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
-        
+
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v, mask)
         output = self.o_proj(o)
@@ -104,6 +104,7 @@ class DreamAttention(nn.Module):
 
 class DreamMLP(nn.Module):
     """Dream MLP with SiLU activation."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -139,6 +140,7 @@ class DreamMLP(nn.Module):
 
 class DreamDecoderLayer(nn.Module):
     """Dream transformer decoder layer."""
+
     def __init__(
         self,
         config: DreamConfig,
@@ -151,7 +153,7 @@ class DreamDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=True,  # Dream uses bias in attention
-            head_dim=getattr(config, 'head_dim', None),
+            head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 10000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
@@ -183,21 +185,21 @@ class DreamDecoderLayer(nn.Module):
 
 class DreamModel(nn.Module):
     """Dream model for diffusion language modeling."""
+
     def __init__(
         self,
         config: DreamConfig,
     ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([DreamDecoderLayer(config) 
-                                     for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([DreamDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = DreamRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -209,23 +211,24 @@ class DreamModel(nn.Module):
 
 class DreamForDiffusionLM(nn.Module):
     """Dream model for diffusion language modeling with LM head."""
+
     packed_modules_mapping = {}
-    
+
     def __init__(
         self,
         config: DreamConfig,
     ) -> None:
         super().__init__()
         self.model = DreamModel(config)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, model_type='diffusion_lm')
-        if getattr(config, 'tie_word_embeddings', False):
+        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, model_type="diffusion_lm")
+        if getattr(config, "tie_word_embeddings", False):
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, mask)
         return hidden_states

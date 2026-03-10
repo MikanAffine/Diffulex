@@ -90,7 +90,11 @@ def dllm_flash_attn_prefill_kernel(
             cur_kv_seqlen = kv_end_idx - kv_start_idx
 
             T.copy(
-                Q[q_start_idx + q_block_idx * BLOCK_M : q_start_idx + (q_block_idx + 1) * BLOCK_M, head_idx, :],
+                Q[
+                    q_start_idx + q_block_idx * BLOCK_M : q_start_idx + (q_block_idx + 1) * BLOCK_M,
+                    head_idx,
+                    :,
+                ],
                 Q_shared,
             )
 
@@ -109,7 +113,11 @@ def dllm_flash_attn_prefill_kernel(
             )
             for kv_block_idx in T.Pipelined(loop_range, num_stages=NUM_STAGES):
                 T.copy(
-                    K[kv_start_idx + kv_block_idx * BLOCK_N : kv_start_idx + (kv_block_idx + 1) * BLOCK_N, kv_head_idx, :],
+                    K[
+                        kv_start_idx + kv_block_idx * BLOCK_N : kv_start_idx + (kv_block_idx + 1) * BLOCK_N,
+                        kv_head_idx,
+                        :,
+                    ],
                     K_shared,
                 )
 
@@ -118,7 +126,9 @@ def dllm_flash_attn_prefill_kernel(
                         num_diffusion_blocks = (q_block_idx * BLOCK_M + i) // DIFFUSION_BLOCK_SIZE + 1
                         acc_score[i, j] = T.if_then_else(
                             (num_diffusion_blocks * DIFFUSION_BLOCK_SIZE <= kv_block_idx * BLOCK_N + j)
-                            or (q_block_idx * BLOCK_M + i >= cur_q_seqlen or kv_block_idx * BLOCK_N + j >= cur_kv_seqlen),
+                            or (
+                                q_block_idx * BLOCK_M + i >= cur_q_seqlen or kv_block_idx * BLOCK_N + j >= cur_kv_seqlen
+                            ),
                             -1e9,
                             0,
                         )
@@ -130,7 +140,13 @@ def dllm_flash_attn_prefill_kernel(
                             0,
                         )
 
-                T.gemm(Q_shared, K_shared, acc_score, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(
+                    Q_shared,
+                    K_shared,
+                    acc_score,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
 
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(ACCUM_DTYPE))
@@ -153,10 +169,19 @@ def dllm_flash_attn_prefill_kernel(
                     acc_output[i, j] *= scores_scale[i]
 
                 T.copy(
-                    V[kv_start_idx + kv_block_idx * BLOCK_N : kv_start_idx + (kv_block_idx + 1) * BLOCK_N, kv_head_idx, :],
+                    V[
+                        kv_start_idx + kv_block_idx * BLOCK_N : kv_start_idx + (kv_block_idx + 1) * BLOCK_N,
+                        kv_head_idx,
+                        :,
+                    ],
                     V_shared,
                 )
-                T.gemm(acc_score_cast, V_shared, acc_output, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(
+                    acc_score_cast,
+                    V_shared,
+                    acc_output,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
 
             for i, j in T.Parallel(BLOCK_M, HEAD_DIM):
                 acc_output[i, j] /= log_sum[i]
@@ -208,7 +233,7 @@ def dllm_flash_attn_prefill_tilelang(
             ]
         ):
             prefill_kernel = dllm_flash_attn_prefill_kernel(
-                attn_metadata.num_seqs,
+                attn_metadata.num_reqs,
                 q.shape[1] // k.shape[1],
                 q.shape[0],
                 k.shape[0],
@@ -229,7 +254,7 @@ def dllm_flash_attn_prefill_tilelang(
 
     config_kwargs = kernel_config if kernel_config is not None else {}
     prefill_kernel = dllm_flash_attn_prefill_kernel(
-        attn_metadata.num_seqs,
+        attn_metadata.num_reqs,
         q.shape[1] // k.shape[1],
         q.shape[0],
         k.shape[0],
@@ -247,4 +272,3 @@ def dllm_flash_attn_prefill_tilelang(
         attn_metadata.cu_seqlens_k,
         attn_metadata.max_seqlen_q,
     )
-

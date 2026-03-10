@@ -8,22 +8,22 @@ class Config:
     model: str
     lora_path: str = ""
     model_name: str = "dream"
-    model_type: str = "diffusion_lm" # "causal_lm" or "diffusion_lm"
-    decoding_strategy: str = "d2f" # "d2f", "fast-dllm-v2", "block-diffusion"
-    
+    model_type: str = "diffusion_lm"  # "causal_lm" or "diffusion_lm"
+    decoding_strategy: str = "d2f"  # "d2f", "fast-dllm-v2", "block-diffusion"
+
     mask_token_id: int = 151666
     diffusion_block_size: int = 32
-    
+
     accept_threshold: float = 0.9
     complete_threshold: float = 0.95
     add_new_block_threshold: float = 0.1
-    
+
     use_lora: bool = False
     max_num_batched_tokens: int = 4096
     max_num_seqs: int = 128
     max_model_len: int = 2048
     gpu_memory_utilization: float = 0.9
-    
+
     data_parallel_size: int = 1
     tensor_parallel_size: int = 2
     # Distributed comm (per tensor-parallel group). When using multiple DP
@@ -34,19 +34,19 @@ class Config:
     shm_name: str = "d2f_vllm"
     # Start device index for this TP group (set by DP launcher).
     device_start: int = 0
-    
+
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
-    kvcache_block_size: int = 256
-    num_kvcache_blocks: int = -1
+    kv_cache_block_size: int = 256
+    num_kv_cache_blocks: int = -1
     k_cache_hdim_split_factor_x: int = 8
     kv_cache_layout: str = "unified"  # "unified" or "distinct"
     kv_cache_dtype: str = "bf16"  # "bf16", "fp16", "fp32", "fp8", "fp8_e4m3", "fp8_e5m2"
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
-        assert self.kvcache_block_size % 16 == 0
+        assert self.kv_cache_block_size % 16 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         assert 1 <= self.data_parallel_size <= 1024
         assert isinstance(self.master_port, int) and 0 < self.master_port < 65536
@@ -60,6 +60,10 @@ class Config:
                 print(f"Warning: LoRA path {self.lora_path} does not exist")
 
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
-        cfg_max_model_len = self.hf_config.max_position_embeddings if hasattr(self.hf_config, "max_position_embeddings") else self.hf_config.max_sequence_length
+        cfg_max_model_len = (
+            self.hf_config.max_position_embeddings
+            if hasattr(self.hf_config, "max_position_embeddings")
+            else self.hf_config.max_sequence_length
+        )
         self.max_model_len = min(self.max_model_len, cfg_max_model_len)
         assert self.max_num_batched_tokens >= self.max_model_len

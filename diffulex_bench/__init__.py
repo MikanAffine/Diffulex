@@ -11,6 +11,7 @@ from diffulex_bench.config import BenchmarkConfig, EngineConfig, EvalConfig
 # Import lm_eval model to register it
 try:
     from diffulex_bench.lm_eval_model import DiffulexLM
+
     __all__ = [
         "BenchmarkRunner",
         "load_benchmark_dataset",
@@ -33,4 +34,3 @@ except ImportError:
         "EngineConfig",
         "EvalConfig",
     ]
-

@@ -15,8 +15,13 @@ import torch
 from flash_attn import flash_attn_varlen_func
 
 from diffulex.attention.metadata import AttnMetaDataBase
-from diffulex_kernel.python.kv_cache_kernels import load_kvcache
-from diffulex_kernel.python.paged_attn_decode_triton import paged_attn_decode_unified_triton
+from diffulex_kernel.python.kv_cache_kernels import load_kv_cache
+from diffulex_kernel.python.paged_attn_decode_triton import (
+    paged_attn_decode_unified_triton,
+)
+from diffulex_kernel.python.chunked_prefill_triton import (
+    chunked_prefill_attn_unified_bf16_cache,
+)
 
 
 def dllm_flash_attn_prefill(
@@ -49,7 +54,7 @@ def _decode_varlen(
 ) -> torch.Tensor:
     """
     Varlen decode path:
-    - gather/dequant KV cache with Triton `load_kvcache`
+    - gather/dequant KV cache with Triton `load_kv_cache`
     - run `flash_attn_varlen_func`
     """
     do_profile = os.getenv("DIFFULEX_PROFILE_KVCACHE", "0") == "1"
@@ -60,7 +65,7 @@ def _decode_varlen(
             torch.cuda.Event(enable_timing=True),
         )
         e0.record()
-        k_comb, v_comb = load_kvcache(k_cache, v_cache, attn_metadata, k, v)
+        k_comb, v_comb = load_kv_cache(k_cache, v_cache, attn_metadata, k, v)
         e1.record()
         out = flash_attn_varlen_func(
             q,
@@ -77,11 +82,11 @@ def _decode_varlen(
         e2.synchronize()
         print(
             f"[DIFFULEX_PROFILE_KVCACHE] decode(varlen) "
-            f"load_kvcache={e0.elapsed_time(e1):.3f}ms flash_attn={e1.elapsed_time(e2):.3f}ms"
+            f"load_kv_cache={e0.elapsed_time(e1):.3f}ms flash_attn={e1.elapsed_time(e2):.3f}ms"
         )
         return out
 
-    k_comb, v_comb = load_kvcache(k_cache, v_cache, attn_metadata, k, v)
+    k_comb, v_comb = load_kv_cache(k_cache, v_cache, attn_metadata, k, v)
     return flash_attn_varlen_func(
         q,
         k_comb,
@@ -162,7 +167,7 @@ def dllm_flash_attn_decode(
     """
     Decode attention wrapper:
     - static: Triton paged-attention over (paged) KV cache + current-step KV
-    - varlen: load_kvcache (Triton gather/dequant) + flash-attn varlen
+    - varlen: load_kv_cache (Triton gather/dequant) + flash-attn varlen
     """
     from diffulex.utils.quantization.context import get_kv_cache_strategy
 
@@ -187,7 +192,19 @@ def dllm_flash_attn_decode(
     raise ValueError(f"Unsupported decode mode: {decode_mode!r}")
 
 
+def dllm_chunked_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    attn_metadata: AttnMetaDataBase,
+) -> torch.Tensor:
+    return chunked_prefill_attn_unified_bf16_cache(q, k, v, k_cache, v_cache, attn_metadata)
+
+
 __all__ = [
     "dllm_flash_attn_prefill",
     "dllm_flash_attn_decode",
+    "dllm_chunked_prefill",
 ]

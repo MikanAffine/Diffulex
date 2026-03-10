@@ -5,7 +5,9 @@ import torch.nn.functional as F
 from einops import rearrange
 from types import SimpleNamespace
 
-from diffulex_kernel.python.paged_attn_decode_triton import paged_attn_decode_unified_triton
+from diffulex_kernel.python.paged_attn_decode_triton import (
+    paged_attn_decode_unified_triton,
+)
 
 
 def _has_fp8() -> bool:
@@ -21,7 +23,7 @@ def _build_cu_seqlens(lengths: torch.Tensor) -> torch.Tensor:
     )
 
 
-def naive_sdpa_with_kvcache(
+def naive_sdpa_with_kv_cache(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -88,7 +90,10 @@ def naive_sdpa_with_kvcache(
     return output
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for Triton paged-attention kernel")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for Triton paged-attention kernel",
+)
 def test_paged_decode_triton_bf16_cache_matches_reference():
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -124,7 +129,11 @@ def test_paged_decode_triton_bf16_cache_matches_reference():
     k = torch.randn((total_q, num_kv_heads, head_dim), device=device, dtype=torch.bfloat16)
     v = torch.randn_like(k)
 
-    k_cache = torch.randn((num_page_blocks, page_size, num_kv_heads, head_dim), device=device, dtype=torch.bfloat16)
+    k_cache = torch.randn(
+        (num_page_blocks, page_size, num_kv_heads, head_dim),
+        device=device,
+        dtype=torch.bfloat16,
+    )
     v_cache = torch.randn_like(k_cache)
 
     md = SimpleNamespace(
@@ -138,7 +147,7 @@ def test_paged_decode_triton_bf16_cache_matches_reference():
     scale = 1.0 / (head_dim**0.5)
 
     out = paged_attn_decode_unified_triton(q, k, v, k_cache, v_cache, md, softmax_scale=scale, fp8_cache=False)
-    ref = naive_sdpa_with_kvcache(
+    ref = naive_sdpa_with_kv_cache(
         q,
         k,
         v,
@@ -156,7 +165,10 @@ def test_paged_decode_triton_bf16_cache_matches_reference():
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for Triton paged-attention kernel")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA is required for Triton paged-attention kernel",
+)
 @pytest.mark.skipif(not _has_fp8(), reason="This torch build does not expose FP8 dtypes")
 def test_paged_decode_triton_fp8_cache_matches_reference():
     torch.manual_seed(0)
@@ -191,7 +203,14 @@ def test_paged_decode_triton_fp8_cache_matches_reference():
     v = torch.randn_like(k)
 
     # Build BF16 "true" cache values, then quantize to FP8 as (x / scale) -> fp8, with per-head scales.
-    k_cache_true = torch.randn((num_page_blocks, page_size, num_kv_heads, head_dim), device=device, dtype=torch.bfloat16) * 0.5
+    k_cache_true = (
+        torch.randn(
+            (num_page_blocks, page_size, num_kv_heads, head_dim),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        * 0.5
+    )
     v_cache_true = torch.randn_like(k_cache_true) * 0.5
 
     eps = 1e-6
@@ -221,7 +240,7 @@ def test_paged_decode_triton_fp8_cache_matches_reference():
     # Reference uses dequantized cache.
     k_cache_deq = (k_cache_fp8.float() * k_scale.view(1, 1, -1, 1)).to(torch.bfloat16)
     v_cache_deq = (v_cache_fp8.float() * v_scale.view(1, 1, -1, 1)).to(torch.bfloat16)
-    ref = naive_sdpa_with_kvcache(
+    ref = naive_sdpa_with_kv_cache(
         q,
         k,
         v,
@@ -237,4 +256,3 @@ def test_paged_decode_triton_fp8_cache_matches_reference():
     )
 
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
-

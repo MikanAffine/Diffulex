@@ -2,7 +2,7 @@
 name = "Diffulex"
 version = "0.0.1"
 authors = [
-    { name = "Drew Jin (Yijie Jin)", email = "drewjin0827@gmail.com"},
+    { name = "Yijie Jin", email = "drewjin0827@gmail.com"},
 ]
 maintainers = [
     { name = "DENG Lab @ SJTU" }
@@ -23,6 +23,7 @@ dependencies = [
     "peft>=0.16.0",
     "pip>=25.1.1",
     "pytest>=8.4.1",
+    "pytest-forked>=1.6.0",
     "pyyaml>=6.0.2",
     "setuptools>=80.9.0",
     "torch",
@@ -40,13 +41,20 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zhijie-group/D2fEngine"
-Repository = "https://zhijie-group.github.io/D2fEngine"
-"Organization" = "https://github.com/zhijie-group"
+Homepage = "https://sjtu-deng-lab.github.io/Diffulex"
+Repository = "https://github.com/SJTU-DENG-Lab/Diffulex"
+Organization = "https://github.com/SJTU-DENG-Lab"
 
-[[tool.uv.index]]
-url = "https://mirrors.aliyun.com/pypi/simple"
-default = true
+[tool.ruff]
+line-length = 120  # Avoid excessive line breaks (default 88 too aggressive)
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120  # Align with formatter
+
+[tool.pytest.ini_options]
+markers = [
+    "diffulex_dry_run: Diffulex engine dry-run tests (GPU, spawns TP workers; run with --forked)",
+]
 
 [tool.setuptools.packages.find]
 include = [
@@ -54,6 +62,5 @@ include = [
     "diffulex_bench",
     "diffulex_kernel",
     "diffulex_legacy",
-    "diffulex_profiler",
     "test"
 ]

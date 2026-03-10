@@ -8,10 +8,24 @@ from pathlib import Path
 from typing import Optional
 
 try:
+    import shutil
+
+    _LOG_WIDTH = max(shutil.get_terminal_size().columns, 120)
+except Exception:
+    _LOG_WIDTH = 160
+
+try:
     from rich.console import Console
     from rich.logging import RichHandler
     from rich.traceback import install as install_rich_traceback
-    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        BarColumn,
+        TimeElapsedColumn,
+    )
+
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
@@ -19,6 +33,7 @@ except ImportError:
 try:
     import colorama
     from colorama import Fore, Style, init as init_colorama
+
     COLORAMA_AVAILABLE = True
     init_colorama(autoreset=True)
 except ImportError:
@@ -27,22 +42,22 @@ except ImportError:
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter with color support"""
-    
+
     if COLORAMA_AVAILABLE:
         COLORS = {
-            'DEBUG': Fore.CYAN,
-            'INFO': Fore.GREEN,
-            'WARNING': Fore.YELLOW,
-            'ERROR': Fore.RED,
-            'CRITICAL': Fore.RED + Style.BRIGHT,
+            "DEBUG": Fore.CYAN,
+            "INFO": Fore.GREEN,
+            "WARNING": Fore.YELLOW,
+            "ERROR": Fore.RED,
+            "CRITICAL": Fore.RED + Style.BRIGHT,
         }
     else:
         COLORS = {}
-    
-    RESET = Style.RESET_ALL if COLORAMA_AVAILABLE else ''
-    
+
+    RESET = Style.RESET_ALL if COLORAMA_AVAILABLE else ""
+
     def format(self, record):
-        log_color = self.COLORS.get(record.levelname, '')
+        log_color = self.COLORS.get(record.levelname, "")
         record.levelname = f"{log_color}{record.levelname}{self.RESET}"
         return super().format(record)
 
@@ -55,13 +70,13 @@ def setup_logger(
 ) -> logging.Logger:
     """
     Setup a professional logger with colored output
-    
+
     Args:
         name: Logger name
         level: Logging level
         log_file: Optional log file path
         use_rich: Whether to use rich library for better formatting
-        
+
     Returns:
         Configured logger
     """
@@ -69,68 +84,74 @@ def setup_logger(
     logger.setLevel(level)
     logger.handlers.clear()
     logger.propagate = False  # Prevent propagation to root logger to avoid duplicate output
-    
+
     # Use Rich if available and requested
     if use_rich and RICH_AVAILABLE:
-        console = Console(stderr=True)
+        console = Console(stderr=True, width=_LOG_WIDTH)
         handler = RichHandler(
             console=console,
             show_time=True,
             show_path=False,
             rich_tracebacks=True,
             markup=True,
+            tracebacks_width=_LOG_WIDTH,
+            tracebacks_code_width=min(_LOG_WIDTH - 20, 160),
+            tracebacks_word_wrap=False,
         )
-        handler.setFormatter(logging.Formatter(
-            "%(message)s",
-            datefmt="[%X]"
-        ))
+        handler.setFormatter(logging.Formatter("%(message)s", datefmt="[%X]"))
         logger.addHandler(handler)
-        
-        # Install rich traceback
-        install_rich_traceback(show_locals=True)
+
+        # Install rich traceback: limit stack depth; when exceeded, show only first + last frame
+        install_rich_traceback(
+            show_locals=True,
+            max_frames=4,
+            width=_LOG_WIDTH,
+            code_width=min(_LOG_WIDTH - 20, 160),
+            word_wrap=False,
+        )
     else:
         # Fallback to colored console handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(level)
-        
+
         if COLORAMA_AVAILABLE:
             formatter = ColoredFormatter(
-                '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
+                "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
         else:
             formatter = logging.Formatter(
-                '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
+                "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
-        
+
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
-    
+
     # Add file handler if specified
     if log_file:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(level)
         file_formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
-    
+
     return logger
 
 
 def get_logger(name: str = "diffulex") -> logging.Logger:
     """
     Get or create a logger
-    
+
     Args:
         name: Logger name
-        
+
     Returns:
         Logger instance
     """
@@ -145,7 +166,7 @@ def get_logger(name: str = "diffulex") -> logging.Logger:
 
 class LoggerMixin:
     """Mixin class to add logger property to classes"""
-    
+
     @property
     def logger(self) -> logging.Logger:
         """Get logger for this class"""
@@ -156,21 +177,22 @@ class LoggerMixin:
 def _add_success_method():
     """Add success method to logging.Logger class"""
     if RICH_AVAILABLE:
+
         def success(self, message: str, *args, **kwargs):
             """Log success message with rich formatting"""
             self.info(f"[green]✓[/green] {message}", *args, **kwargs)
     else:
+
         def success(self, message: str, *args, **kwargs):
             """Log success message"""
             if COLORAMA_AVAILABLE:
                 self.info(f"{Fore.GREEN}✓{Style.RESET_ALL} {message}", *args, **kwargs)
             else:
                 self.info(f"✓ {message}", *args, **kwargs)
-    
-    if not hasattr(logging.Logger, 'success'):
+
+    if not hasattr(logging.Logger, "success"):
         logging.Logger.success = success
 
 
 # Initialize success method
 _add_success_method()
-

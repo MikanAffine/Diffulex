@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class KVCacheQuantConfig:
+class kv_cacheQuantConfig:
     """KV-cache quantization configuration."""
 
     dtype: str = "bf16"
@@ -44,7 +44,7 @@ class ActivationQuantConfig:
 class QuantizationConfig:
     """Top-level quantization configuration for Diffulex."""
 
-    kv_cache: KVCacheQuantConfig = KVCacheQuantConfig()
+    kv_cache: kv_cacheQuantConfig = kv_cacheQuantConfig()
     weights: WeightQuantConfig = WeightQuantConfig()
     activations: ActivationQuantConfig = ActivationQuantConfig()
 
@@ -57,7 +57,7 @@ class QuantizationConfig:
         linear_attn_act_dtype = getattr(config, "linear_attn_act_dtype", "bf16") or "bf16"
         linear_mlp_act_dtype = getattr(config, "linear_mlp_act_dtype", "bf16") or "bf16"
         return cls(
-            kv_cache=KVCacheQuantConfig(dtype=kv_cache_dtype),
+            kv_cache=kv_cacheQuantConfig(dtype=kv_cache_dtype),
             weights=WeightQuantConfig(
                 linear_attn_dtype=linear_attn_weight_dtype,
                 linear_mlp_dtype=linear_mlp_weight_dtype,
@@ -67,5 +67,3 @@ class QuantizationConfig:
                 linear_mlp_dtype=linear_mlp_act_dtype,
             ),
         )
-
-

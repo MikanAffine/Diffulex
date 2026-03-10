@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Deque, Set
 
 from diffulex_legacy.config import Config
-from diffulex_legacy.engine.sequence import SequenceBase, SequenceForCausalLM, SequenceForDiffusionLM
+from diffulex_legacy.engine.sequence import (
+    SequenceBase,
+    SequenceForCausalLM,
+    SequenceForDiffusionLM,
+)
 
 
 @dataclass
@@ -103,12 +107,12 @@ class BlockManagerBase(ABC):
     @abstractmethod
     def may_append(self, seq: SequenceBase):
         pass
-            
+
 
 class BlockManagerForCausalLM(BlockManagerBase):
     def can_append(self, seq: SequenceForCausalLM) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
-    
+
     def may_append(self, seq: SequenceBase):
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
@@ -119,7 +123,7 @@ class BlockManagerForCausalLM(BlockManagerBase):
             block_table.append(block_id)
         elif len(seq) % self.block_size == 0:
             assert last_block.hash == -1
-            token_ids = seq.block(seq.num_blocks-1)
+            token_ids = seq.block(seq.num_blocks - 1)
             prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
             h = self.compute_hash(token_ids, prefix)
             last_block.update(h, token_ids)
@@ -127,26 +131,29 @@ class BlockManagerForCausalLM(BlockManagerBase):
         else:
             assert last_block.hash == -1
 
+
 class BlockManagerForDiffusionLM(BlockManagerBase):
     def can_append(self, seq: SequenceForDiffusionLM) -> bool:
         return len(self.free_block_ids) >= (seq.cached_or_caching_num_tokens % self.block_size == 1)
-    
+
     def may_append(self, seq: SequenceForDiffusionLM):
         # Handle edge case when no tokens are cached yet
         if seq.cached_or_caching_num_tokens == 0:
             return
-            
+
         block_table = seq.block_table
         if not block_table:
             return
-            
+
         last_block = self.blocks[block_table[-1]]
-        
+
         if seq.cached_or_caching_num_tokens // self.block_size == len(seq.block_table):
             if last_block.hash == -1:
-                prev_block_end_token = seq.cached_or_caching_num_tokens - seq.caching_num_tokens - 1  # 256th token (0-indexed: 255)
+                prev_block_end_token = (
+                    seq.cached_or_caching_num_tokens - seq.caching_num_tokens - 1
+                )  # 256th token (0-indexed: 255)
                 prev_block_idx = prev_block_end_token // self.block_size  # block containing 255th token
-                
+
                 if prev_block_idx < seq.num_blocks:
                     # This block should be full, so set its hash
                     token_ids = seq.block(prev_block_idx)
@@ -154,7 +161,7 @@ class BlockManagerForDiffusionLM(BlockManagerBase):
                     h = self.compute_hash(token_ids, prefix)
                     last_block.update(h, token_ids)
                     self.hash_to_block_id[h] = last_block.block_id
-            
+
             # Now allocate a new block
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
@@ -166,9 +173,10 @@ class AutoBlockManager(BlockManagerBase):
         "causal_lm": BlockManagerForCausalLM,
         "diffusion_lm": BlockManagerForDiffusionLM,
     }
+
     @classmethod
     def from_config(cls, config: Config) -> BlockManagerBase:
         block_manager_cls = cls.BLOCK_MANAGER_MAPPING.get(config.model_type)
         if not block_manager_cls:
             raise ValueError(f"Unsupported model type: {config.model_type}")
-        return block_manager_cls(config.num_kvcache_blocks, config.kvcache_block_size)
+        return block_manager_cls(config.num_kv_cache_blocks, config.kv_cache_block_size)

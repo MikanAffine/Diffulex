@@ -91,10 +91,7 @@ class LinearAWQW4A16Strategy(LinearQuantizationStrategy):
     def dequantize(self, quantized: torch.Tensor, scale_or_metadata: Any, **kwargs) -> torch.Tensor:
         if quantized.is_floating_point():
             return quantized
-        raise NotImplementedError(
-            "AWQ dequantize is not implemented in Diffulex. "
-            "Use vLLM kernels via linear_forward."
-        )
+        raise NotImplementedError("AWQ dequantize is not implemented in Diffulex. Use vLLM kernels via linear_forward.")
 
     def linear_forward(
         self,
@@ -114,8 +111,7 @@ class LinearAWQW4A16Strategy(LinearQuantizationStrategy):
         _ = quant_kind, weight, pack_factor, in_features, group_size
         if not self._ops_available:
             raise RuntimeError(
-                "vLLM is required for AWQ W4A16 (missing `vllm._custom_ops`). "
-                "Please install/build vLLM with CUDA ops."
+                "vLLM is required for AWQ W4A16 (missing `vllm._custom_ops`). Please install/build vLLM with CUDA ops."
             )
         qweight = awq_qweight
         qzeros = awq_qzeros
@@ -154,4 +150,3 @@ class LinearAWQW4A16Strategy(LinearQuantizationStrategy):
             out.add_(bias.to(dtype=out.dtype))
         out = out.reshape(out_shape)
         return out.to(dtype=x.dtype) if out.dtype != x.dtype else out
-

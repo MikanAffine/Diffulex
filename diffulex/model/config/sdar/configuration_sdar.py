@@ -74,5 +74,3 @@ class SDARConfig(PretrainedConfig):
 
 
 __all__ = ["SDARConfig"]
-
-

@@ -109,7 +109,11 @@ class LinearAWQMarlinW4A16Strategy(LinearQuantizationStrategy):
         # AWQ marlin does not use g_idx/perm; pass empty tensors (cached).
         empty = self._empty_cache.get(dev_key)
         if empty is None:
-            empty = marlin_make_empty_g_idx(device) if marlin_make_empty_g_idx is not None else torch.empty((0,), device=device, dtype=torch.int32)
+            empty = (
+                marlin_make_empty_g_idx(device)
+                if marlin_make_empty_g_idx is not None
+                else torch.empty((0,), device=device, dtype=torch.int32)
+            )
             self._empty_cache[dev_key] = empty
 
         # Cache permuted bias.
@@ -132,11 +136,7 @@ class LinearAWQMarlinW4A16Strategy(LinearQuantizationStrategy):
             akey = (dev_key, dtype_id, m, n, k)
             cached = self._atomic_add_cache.get(akey)
             if cached is None:
-                cached = bool(
-                    should_use_atomic_add_reduce(
-                        m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype
-                    )
-                )
+                cached = bool(should_use_atomic_add_reduce(m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype))
                 self._atomic_add_cache[akey] = cached
             use_atomic_add = cached
 
@@ -163,4 +163,3 @@ class LinearAWQMarlinW4A16Strategy(LinearQuantizationStrategy):
         )
         out = out.reshape(out_shape)
         return out.to(dtype=x.dtype) if out.dtype != x.dtype else out
-

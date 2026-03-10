@@ -46,7 +46,7 @@ _REPO_ROOT = PathLib(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 from safetensors import safe_open
 from glob import glob
 
@@ -61,9 +61,7 @@ def _require_vllm():
             quantize_weights,
         )
     except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            "离线 GPTQ/AWQ 打包已切换到 vLLM 标准格式，需要可 import 的 vLLM。"
-        ) from e
+        raise RuntimeError("离线 GPTQ/AWQ 打包已切换到 vLLM 标准格式，需要可 import 的 vLLM。") from e
     return scalar_types, quantize_weights, gptq_pack, awq_pack, pack_cols
 
 
@@ -75,9 +73,7 @@ def _require_vllm_marlin():
             marlin_permute_scales,
         )
     except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            "导出 gptq_marlin 格式需要可 import 的 vLLM Marlin（含 CUDA custom ops）。"
-        ) from e
+        raise RuntimeError("导出 gptq_marlin 格式需要可 import 的 vLLM Marlin（含 CUDA custom ops）。") from e
     return ops, marlin_permute_scales
 
 
@@ -95,15 +91,11 @@ def _require_awq():
     try:
         from awq import AutoAWQForCausalLM  # type: ignore
     except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            "未能导入 awq（autoawq 的导入名是 `awq`）。"
-        ) from e
+        raise RuntimeError("未能导入 awq（autoawq 的导入名是 `awq`）。") from e
     return AutoAWQForCausalLM
 
 
-def _load_calib_texts(
-    calib_text_file: str, *, num_samples: int, seed: int
-) -> list[str]:
+def _load_calib_texts(calib_text_file: str, *, num_samples: int, seed: int) -> list[str]:
     p = Path(calib_text_file)
     if not p.exists():
         raise FileNotFoundError(f"calib_text_file 不存在: {calib_text_file}")
@@ -119,9 +111,7 @@ def _load_calib_texts(
     return rng.sample(lines, k=num_samples)
 
 
-def _build_autogptq_examples(
-    tokenizer, texts: list[str], *, seq_len: int
-) -> list[dict[str, torch.Tensor]]:
+def _build_autogptq_examples(tokenizer, texts: list[str], *, seq_len: int) -> list[dict[str, torch.Tensor]]:
     if seq_len <= 0:
         raise ValueError(f"calib_seq_len 必须 > 0, got {seq_len}")
 
@@ -162,9 +152,7 @@ def _quantize_to_vllm_gptq(
     # used by `gptq_pack/pack_cols` requires 32 % bits == 0.
     # So we support 2/4/8 here; 3-bit would need a different packing scheme.
     if bits not in (2, 4, 8):
-        raise ValueError(
-            f"GPTQ bits 仅支持 2/4/8（vLLM 标准 int32 pack 要求 32%bits==0），当前 bits={bits}"
-        )
+        raise ValueError(f"GPTQ bits 仅支持 2/4/8（vLLM 标准 int32 pack 要求 32%bits==0），当前 bits={bits}")
 
     # vLLM operates on (K, N)
     w = weight.T.contiguous()
@@ -331,7 +319,11 @@ def _export_autogptq_to_vllm_weights(
         scales = getattr(module, "scales")
         g_idx = getattr(module, "g_idx", None)
 
-        if not isinstance(qweight, torch.Tensor) or not isinstance(qzeros, torch.Tensor) or not isinstance(scales, torch.Tensor):
+        if (
+            not isinstance(qweight, torch.Tensor)
+            or not isinstance(qzeros, torch.Tensor)
+            or not isinstance(scales, torch.Tensor)
+        ):
             continue
 
         if quant_format == "gptq":
@@ -404,7 +396,11 @@ def _export_awq_to_vllm_weights(
         qweight = getattr(module, "qweight")
         qzeros = getattr(module, "qzeros")
         scales = getattr(module, "scales")
-        if not isinstance(qweight, torch.Tensor) or not isinstance(qzeros, torch.Tensor) or not isinstance(scales, torch.Tensor):
+        if (
+            not isinstance(qweight, torch.Tensor)
+            or not isinstance(qzeros, torch.Tensor)
+            or not isinstance(scales, torch.Tensor)
+        ):
             continue
 
         quantized_weights[f"{module_name}.qweight"] = qweight.detach().cpu().contiguous()
@@ -435,7 +431,7 @@ def quantize_model(
     use_triton: bool = True,
 ) -> None:
     """Quantize model weights to GPTQ/AWQ format.
-    
+
     Args:
         model_path: Path to input model directory (containing safetensors files)
         output_path: Path to output directory (will create if not exists)
@@ -449,9 +445,7 @@ def quantize_model(
         calib_text_file: 校准文本文件（每行一条样本）
     """
     if quant_format not in ["gptq", "gptq_marlin", "awq"]:
-        raise ValueError(
-            f"Unsupported quant_format: {quant_format}. Must be 'gptq', 'gptq_marlin' or 'awq'"
-        )
+        raise ValueError(f"Unsupported quant_format: {quant_format}. Must be 'gptq', 'gptq_marlin' or 'awq'")
     if quant_method not in ["auto", "simple"]:
         raise ValueError("quant_method must be 'auto' or 'simple'")
 
@@ -459,10 +453,10 @@ def quantize_model(
     if quant_format == "gptq_marlin":
         desc_act = False
         sym = True
-    
+
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Load model config (for tokenizer special tokens, etc.)
     _ = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
@@ -629,9 +623,7 @@ def quantize_model(
                 quantized_weights[f"{prefix}.g_idx"] = g_idx.cpu()
 
             else:  # awq
-                qweight, qzeros, scales = _quantize_to_vllm_awq(
-                    weight_fp32, group_size=group_size, bits=bits
-                )
+                qweight, qzeros, scales = _quantize_to_vllm_awq(weight_fp32, group_size=group_size, bits=bits)
                 quantized_weights[f"{prefix}.qweight"] = qweight.cpu()
                 quantized_weights[f"{prefix}.qzeros"] = qzeros.cpu()
                 quantized_weights[f"{prefix}.scales"] = scales.cpu()
@@ -648,31 +640,32 @@ def quantize_model(
 
             if device == "cuda":
                 torch.cuda.empty_cache()
-    
+
     # Copy all model files (config, tokenizer, etc.) to output directory
     import shutil
+
     print(f"\nCopying model files to {output_path}...")
     model_path_obj = Path(model_path)
-    
+
     # First, copy original safetensors files (for non-quantized layers like lm_head, embeddings, etc.)
     print("  Copying original safetensors files (for non-quantized layers)...")
     for file in model_path_obj.glob("*.safetensors"):
         dest_file = output_path / file.name
         shutil.copy2(file, dest_file)
         print(f"    Copied {file.name}")
-    
+
     # Copy other non-safetensors files
     for file in model_path_obj.iterdir():
-        if file.is_file() and not file.name.endswith('.safetensors'):
+        if file.is_file() and not file.name.endswith(".safetensors"):
             dest_file = output_path / file.name
             shutil.copy2(file, dest_file)
             print(f"  Copied {file.name}")
-    
+
     # Save quantized weights to safetensors (this will add quantized weights to the directory)
     output_file = output_path / f"model_quantized_{quant_format}.safetensors"
     print(f"\nSaving quantized weights to {output_file}...")
     save_file(quantized_weights, output_file)
-    
+
     # Save metadata
     metadata_file = output_path / f"quantization_metadata_{quant_format}.json"
     with open(metadata_file, "w") as f:
@@ -703,13 +696,13 @@ def quantize_model(
         }
         with open(output_path / "quantize_config.json", "w", encoding="utf-8") as f:
             json.dump(quantize_cfg, f, indent=2)
-    
-    print(f"\n✓ Quantization complete!")
+
+    print("\n✓ Quantization complete!")
     print(f"  - Quant method: {quant_method}")
     print(f"  - Output directory: {output_path}")
     print(f"  - Quantized weights file: {output_file}")
     print(f"  - Metadata file: {metadata_file}")
-    print(f"\n  You can now use this directory directly as model path:")
+    print("\n  You can now use this directory directly as model path:")
     print(f"    --model-path {output_path}")
 
 
@@ -729,8 +722,18 @@ def main():
     )
     parser.add_argument("--group-size", type=int, default=128, help="量化组大小 (默认: 128)")
     parser.add_argument("--bits", type=int, default=4, help="每个权重的位数 (默认: 4)")
-    parser.add_argument("--target-modules", type=str, help="要量化的模块名称模式（逗号分隔），例如: q_proj,k_proj,v_proj")
-    parser.add_argument("--device", type=str, choices=["cpu", "cuda"], default="cpu", help="量化设备 (默认: cpu)")
+    parser.add_argument(
+        "--target-modules",
+        type=str,
+        help="要量化的模块名称模式（逗号分隔），例如: q_proj,k_proj,v_proj",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cpu", "cuda"],
+        default="cpu",
+        help="量化设备 (默认: cpu)",
+    )
     parser.add_argument(
         "--quant-method",
         type=str,
@@ -744,9 +747,20 @@ def main():
     parser.add_argument("--calib-batch-size", type=int, default=1, help="校准 batch size (默认: 1)")
     parser.add_argument("--calib-seed", type=int, default=0, help="校准采样随机种子 (默认: 0)")
     parser.add_argument("--desc-act", action="store_true", help="GPTQ act-order(desc_act) (默认: False)")
-    parser.add_argument("--sym", dest="sym", action="store_true", default=True, help="GPTQ symmetric quant (默认: True)")
+    parser.add_argument(
+        "--sym",
+        dest="sym",
+        action="store_true",
+        default=True,
+        help="GPTQ symmetric quant (默认: True)",
+    )
     parser.add_argument("--no-sym", dest="sym", action="store_false", help="关闭 GPTQ symmetric quant")
-    parser.add_argument("--damp-percent", type=float, default=0.01, help="GPTQ damp_percent (默认: 0.01)")
+    parser.add_argument(
+        "--damp-percent",
+        type=float,
+        default=0.01,
+        help="GPTQ damp_percent (默认: 0.01)",
+    )
     parser.add_argument(
         "--true-sequential",
         dest="true_sequential",
@@ -773,13 +787,13 @@ def main():
         action="store_false",
         help="关闭 AutoGPTQ Triton backend（可能回退到 CUDA extension）",
     )
-    
+
     args = parser.parse_args()
-    
+
     target_modules = None
     if args.target_modules:
         target_modules = [m.strip() for m in args.target_modules.split(",")]
-    
+
     quantize_model(
         model_path=args.model_path,
         output_path=args.output_path,

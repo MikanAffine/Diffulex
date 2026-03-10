@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 import sys
 
-from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from diffulex import Diffulex, SamplingParams
@@ -83,7 +82,7 @@ def main() -> None:
         tensor_parallel_size=1,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_num_batched_tokens=2048,
-        max_num_seqs=args.num_prompts,
+        max_num_reqs=args.num_prompts,
         max_model_len=2048,
         kv_cache_layout="unified",
         decoding_strategy="block_diffusion",
@@ -107,7 +106,7 @@ def main() -> None:
         end_time = time.time()
 
         elapsed_time = end_time - start_time
-        total_tokens = sum(len(o['token_ids']) for o in outputs)
+        total_tokens = sum(len(o["token_ids"]) for o in outputs)
 
         print("\n" + "=" * 80)
         print("[Async Inference Results]")
@@ -116,8 +115,8 @@ def main() -> None:
         print(f"Total tokens: {total_tokens}")
         print(f"Total time: {elapsed_time:.2f} seconds")
         print(f"Average TPS: {total_tokens / elapsed_time:.2f} tok/s")
-        if outputs and 'n_diff_steps' in outputs[0]:
-            avg_diff_steps = sum(o['n_diff_steps'] for o in outputs) / len(outputs)
+        if outputs and "n_diff_steps" in outputs[0]:
+            avg_diff_steps = sum(o["n_diff_steps"] for o in outputs) / len(outputs)
             print(f"Average steps: {avg_diff_steps:.2f}")
 
         print("\n" + "=" * 80)
@@ -127,14 +126,15 @@ def main() -> None:
             print(f"\n[Output {idx + 1}/{len(outputs)}]")
             print(f"Text: {output['text']}")
             print(f"Token IDs length: {len(output['token_ids'])}")
-            if 'n_diff_steps' in output:
+            if "n_diff_steps" in output:
                 print(f"Number of steps: {output['n_diff_steps']}")
             print("-" * 80)
 
     except Exception as e:
-        print(f"\n[Error during async inference]")
+        print("\n[Error during async inference]")
         print(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         # Cleanup

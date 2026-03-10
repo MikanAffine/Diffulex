@@ -9,7 +9,7 @@ from pathlib import Path
 def create_argument_parser() -> argparse.ArgumentParser:
     """
     Create and configure argument parser for benchmark
-    
+
     Returns:
         Configured ArgumentParser instance
     """
@@ -36,9 +36,9 @@ Examples:
     --dataset gsm8k \\
     --temperature 0.0 \\
     --max-tokens 256
-        """
+        """,
     )
-    
+
     # Logging arguments
     parser.add_argument(
         "--log-file",
@@ -53,14 +53,14 @@ Examples:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level",
     )
-    
+
     # Configuration file
     parser.add_argument(
         "--config",
         type=str,
         help="Configuration file path (YAML or JSON). Default: configs/example.yml",
     )
-    
+
     # Model arguments
     parser.add_argument(
         "--model-path",
@@ -84,8 +84,8 @@ Examples:
         "--decoding-strategy",
         type=str,
         default="d2f",
-        choices=["d2f", "block_diffusion", "fast_dllm"],
-        help="Decoding strategy",
+        choices=["d2f", "multi_bd"],
+        help="Decoding strategy (d2f, multi_bd)",
     )
     parser.add_argument(
         "--mask-token-id",
@@ -93,7 +93,7 @@ Examples:
         default=151666,
         help="Mask token ID",
     )
-    
+
     # Inference arguments
     parser.add_argument(
         "--tensor-parallel-size",
@@ -128,10 +128,16 @@ Examples:
     parser.add_argument(
         "--max-num-seqs",
         type=int,
-        default=128,
-        help="Maximum number of sequences",
+        default=None,
+        help="(Deprecated) Maximum number of sequences; use --max-num-reqs",
     )
-    
+    parser.add_argument(
+        "--max-num-reqs",
+        type=int,
+        default=None,
+        help="Maximum number of requests",
+    )
+
     # Sampling arguments
     parser.add_argument(
         "--temperature",
@@ -150,7 +156,7 @@ Examples:
         action="store_true",
         help="Ignore EOS token",
     )
-    
+
     # Dataset arguments
     parser.add_argument(
         "--dataset",
@@ -170,7 +176,7 @@ Examples:
         default=None,
         help="Limit number of samples",
     )
-    
+
     # Output arguments
     parser.add_argument(
         "--output-dir",
@@ -190,7 +196,7 @@ Examples:
         action="store_false",
         help="Do not save results to file",
     )
-    
+
     # LoRA arguments
     parser.add_argument(
         "--use-lora",
@@ -203,7 +209,13 @@ Examples:
         default="",
         help="LoRA path",
     )
-    
+    parser.add_argument(
+        "--pre-merge-lora",
+        action="store_true",
+        dest="pre_merge_lora",
+        help="Merge LoRA into base weights at load to avoid per-forward compute",
+    )
+
     # Engine arguments
     parser.add_argument(
         "--enforce-eager",
@@ -224,33 +236,40 @@ Examples:
         choices=["unified", "distinct"],
         help="KV cache layout",
     )
-    
+
     # D2F-specific arguments
     parser.add_argument(
-        "--accept-threshold",
-        type=float,
-        default=0.9,
-        help="Accept threshold for D2F",
-    )
-    parser.add_argument(
-        "--complete-threshold",
-        type=float,
-        default=0.95,
-        help="Complete threshold for D2F",
-    )
-    parser.add_argument(
-        "--add-new-block-threshold",
+        "--add-block-threshold",
         type=float,
         default=0.1,
-        help="Add new block threshold for D2F",
+        help="Add block threshold for D2F",
     )
     parser.add_argument(
-        "--diffusion-block-size",
-        type=int,
-        default=32,
-        help="Diffusion block size",
+        "--semi-complete-threshold",
+        type=float,
+        default=0.9,
+        help="Semi-complete threshold for D2F",
     )
-    
+    parser.add_argument(
+        "--decoding-threshold",
+        type=float,
+        default=0.9,
+        help="Decoding threshold for D2F",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=None,
+        dest="block_size",
+        help="Diffusion block size (aligned with diffulex Config.block_size, default 32)",
+    )
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        default=None,
+        help="Number of active diffusion blocks in buffer",
+    )
+
     # Quantization arguments
     parser.add_argument(
         "--kv-cache-dtype",
@@ -290,18 +309,17 @@ Examples:
         default=None,
         help="Linear MLP activation dtype",
     )
-    
+
     return parser
 
 
 def get_default_config_path() -> Path:
     """
     Get default configuration file path
-    
+
     Returns:
         Path to default config file
     """
     config_dir = Path(__file__).parent / "configs"
     default_config = config_dir / "example.yml"
     return default_config
-

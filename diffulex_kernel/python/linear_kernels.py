@@ -17,6 +17,7 @@ from tvm import tir
 
 from diffulex_kernel.python.auto_tuner import build_linear_configs
 
+
 @tilelang.autotune(configs=build_linear_configs())
 @tilelang.jit(out_idx=[3])
 def w8a16_gemm(
@@ -30,7 +31,7 @@ def w8a16_gemm(
     threads: int = 128,
 ):
     """W8A16 GEMM kernel: bf16 activation × int8 weight (per-channel dequantized).
-    
+
     Args:
         M: Number of rows in activation matrix A
         N: Number of output channels (rows in weight matrix B)
@@ -40,7 +41,7 @@ def w8a16_gemm(
         block_K: Block size for K dimension
         num_stages: Number of pipeline stages
         threads: Number of threads per block
-    
+
     Returns:
         Compiled TileLang kernel function with signature:
         kernel(A: bf16[M, K], B: int8[N, K], Scales: bf16[N], C: bf16[M, N]) -> None
@@ -51,17 +52,17 @@ def w8a16_gemm(
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), T.bfloat16),           # activation, shape (M, K)
-        B: T.Tensor((N, K), T.int8),              # quantized weight, shape (N, K)
-        Scales: T.Tensor((N,), T.bfloat16),       # per-channel scales, shape (N,)
-        C: T.Tensor((M, N), T.bfloat16),          # output, shape (M, N)
+        A: T.Tensor((M, K), T.bfloat16),  # activation, shape (M, K)
+        B: T.Tensor((N, K), T.int8),  # quantized weight, shape (N, K)
+        Scales: T.Tensor((N,), T.bfloat16),  # per-channel scales, shape (N,)
+        C: T.Tensor((M, N), T.bfloat16),  # output, shape (M, N)
     ):
         """W8A16 GEMM kernel implementation.
-        
+
         Computes C = (A @ q^T) * Scales where q is the int8 quantized weight and Scales is per-output-channel.
         This is mathematically equivalent to dequantizing weights inside the K loop, but avoids doing the
         multiply-by-scale for every (N, K) element in every K tile.
-        
+
         This implementation follows the W4A8 pattern with fragments for proper pipelining.
         """
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
@@ -71,22 +72,22 @@ def w8a16_gemm(
             # Allocate shared memory buffers
             A_shared = T.alloc_shared((block_M, block_K), T.bfloat16)
             B_shared = T.alloc_shared((block_N, block_K), T.int8)
-            
+
             # Allocate fragments (matching W4A8 pattern for proper pipelining)
             B_local = T.alloc_fragment((block_N, block_K), T.int8)
             B_bf16_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
             B_bf16_prev_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
-            
+
             # Allocate fragment for accumulation (use float32 for precision)
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
             C_scaled = T.alloc_fragment((block_M, block_N), T.bfloat16)
-            
+
             # Optional: Add swizzled layout for B_shared (can improve performance)
             # T.annotate_layout({B_shared: tilelang.layout.make_swizzled_layout(B_shared)})
-            
+
             # Clear accumulation buffer
             T.clear(C_local)
-            
+
             # Pipeline over K dimension
             # Using the same pattern as W4A8: T.Pipelined(K // block_K, num_stages=num_stages)
             # The key: we copy B_shared -> B_local, dequantize to B_dequantize_local,
@@ -100,17 +101,17 @@ def w8a16_gemm(
                     # Load A and B tiles to shared memory
                     T.copy(A[by * block_M, k * block_K], A_shared)
                     T.copy(B[bx * block_N, k * block_K], B_shared)
-                
+
                     # Copy B_shared to local fragment (required for proper pipelining)
                     T.copy(B_shared, B_local)
-                
+
                     # Cast int8 -> bf16 (no scale here; apply scale once at output).
                     for i, j in T.Parallel(block_N, block_K):
                         B_bf16_local[i, j] = B_local[i, j].astype(T.float32).astype(T.bfloat16)
-                
+
                     # Copy to prev_local (required for pipeline synchronization)
                     T.copy(B_bf16_local, B_bf16_prev_local)
-                
+
                     # GEMM: C = A @ B_dequant^T
                     T.gemm(A_shared, B_bf16_prev_local, C_local, transpose_B=True)
             else:
@@ -148,7 +149,7 @@ def w8a16_gemm(
 
                     # GEMM (padded with zeros for out-of-range A/B)
                     T.gemm(A_shared, B_bf16_prev_local, C_local, transpose_B=True)
-            
+
             # Apply per-channel scale at output:
             # C[m, n] = (A @ q^T)[m, n] * Scales[n]
             if aligned:
@@ -171,7 +172,7 @@ def w8a16_gemm(
                     C_scaled[i, j] = (C_local[i, j] * scale_f32).astype(T.bfloat16)
                     if (m < M) & (n < N):
                         C[m, n] = C_scaled[i, j]
-    
+
     return main
 
 
@@ -300,7 +301,7 @@ def w4a16_gemm(
     threads: int = 128,
 ):
     """W4A16 GEMM kernel: bf16 activation × int4 weight (packed in int8, per-channel dequantized).
-    
+
     Args:
         M: Number of rows in activation matrix A
         N: Number of output channels (rows in weight matrix B)
@@ -310,11 +311,11 @@ def w4a16_gemm(
         block_K: Block size for K dimension
         num_stages: Number of pipeline stages
         threads: Number of threads per block
-    
+
     Returns:
         Compiled TileLang kernel function with signature:
         kernel(A: bf16[M, K], B_packed: int8[N, (K+1)//2], Scales: bf16[N], C: bf16[M, N]) -> None
-        
+
     Note:
         B_packed is int4 weights packed into int8 format. Each int8 byte contains 2 int4 values:
         - Lower 4 bits: first int4 value (in range [0, 15], representing [-8, 7])
@@ -323,24 +324,24 @@ def w4a16_gemm(
     # Fast path: only generate the simple copy-based kernel when all dims are perfectly tiled.
     # Otherwise, generate a masked (tail-safe) kernel to avoid falling back for non-multiple sizes.
     aligned = (M % block_M == 0) and (N % block_N == 0) and (K % block_K == 0)
-    
+
     # Packed size: (K + 1) // 2
     packed_K = (K + 1) // 2
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), T.bfloat16),           # activation, shape (M, K)
-        B_packed: T.Tensor((N, packed_K), T.int8), # packed int4 weight, shape (N, (K+1)//2)
-        Scales: T.Tensor((N,), T.bfloat16),        # per-channel scales, shape (N,)
-        C: T.Tensor((M, N), T.bfloat16),           # output, shape (M, N)
+        A: T.Tensor((M, K), T.bfloat16),  # activation, shape (M, K)
+        B_packed: T.Tensor((N, packed_K), T.int8),  # packed int4 weight, shape (N, (K+1)//2)
+        Scales: T.Tensor((N,), T.bfloat16),  # per-channel scales, shape (N,)
+        C: T.Tensor((M, N), T.bfloat16),  # output, shape (M, N)
     ):
         """W4A16 GEMM kernel implementation.
-        
+
         Computes C = A @ B_dequant^T where:
         - B_packed[i, j] contains 2 int4 values (packed in int8)
         - Each int4 value is unpacked to q in [-8, 7]
         - Per-channel dequantization is applied as: (A @ q^T) * Scales[n]  (Scales is per-output-channel)
-        
+
         This implementation avoids per-element dequantization inside the K loop by
         factoring the per-channel scale to an output-side column scaling step, which
         substantially reduces work vs. dequantizing every weight element.
@@ -348,7 +349,7 @@ def w4a16_gemm(
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             zero_i8 = tir.const(0, T.int8)
             zero_bf16 = tir.const(0, T.bfloat16)
-            
+
             # Constants for int4 unpacking
             int4_offset = tir.const(8, T.int8)  # Offset to convert [0, 15] to [-8, 7]
             mask_lower = tir.const(0x0F, T.int8)  # Mask for lower 4 bits
@@ -357,34 +358,34 @@ def w4a16_gemm(
             # Allocate shared memory buffers
             A_shared = T.alloc_shared((block_M, block_K), T.bfloat16)
             B_packed_shared = T.alloc_shared((block_N, (block_K + 1) // 2), T.int8)
-            
+
             # Allocate fragments (matching W8A16 pattern for proper pipelining)
             B_packed_local = T.alloc_fragment((block_N, (block_K + 1) // 2), T.int8)
             B_unpacked_local = T.alloc_fragment((block_N, block_K), T.int8)  # Unpacked int4 (as int8)
             B_bf16_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
             B_bf16_prev_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
-            
+
             # Allocate fragment for accumulation (use float32 for precision)
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
             C_scaled = T.alloc_fragment((block_M, block_N), T.bfloat16)
-            
+
             # Clear accumulation buffer
             T.clear(C_local)
-            
+
             # Pipeline over K dimension
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
                     # Load A tile to shared memory
                     T.copy(A[by * block_M, k * block_K], A_shared)
-                    
+
                     # Load B_packed tile to shared memory
                     packed_k_start = (k * block_K) // 2  # Packed index for K dimension
                     T.copy(B_packed[bx * block_N, packed_k_start], B_packed_shared)
-                    
+
                     # Copy B_packed_shared to local fragment
                     T.copy(B_packed_shared, B_packed_local)
-                    
+
                     # Unpack int4 from packed int8 (TileLang-friendly indexing):
                     # B_unpacked_local is indexed by (i, j) directly to avoid indices-mismatch issues.
                     for i, j in T.Parallel(block_N, block_K):
@@ -403,7 +404,7 @@ def w4a16_gemm(
 
                     # Copy to prev_local (required for pipeline synchronization)
                     T.copy(B_bf16_local, B_bf16_prev_local)
-                    
+
                     # GEMM: C = A @ B_dequant^T
                     # Here B is q (int4) cast to bf16; scale is applied once after K-accumulation.
                     T.gemm(A_shared, B_bf16_prev_local, C_local, transpose_B=True)
@@ -434,28 +435,28 @@ def w4a16_gemm(
 
                     # Copy B_packed_shared to local fragment
                     T.copy(B_packed_shared, B_packed_local)
-                    
+
                     # Unpack int4 from int8 with boundary checks
                     for i, j in T.Parallel(block_N, block_K):
                         kk = k * block_K + j
                         # Convert to local packed index within this block
                         j_packed = j // 2
                         packed_byte = B_packed_local[i, j_packed]
-                        
+
                         # Extract both lower and upper 4 bits
                         lower_uint = (packed_byte & mask_lower).astype(T.int8)
                         upper_uint = ((packed_byte >> mask_upper_shift) & mask_lower).astype(T.int8)
                         lower_int4 = lower_uint - int4_offset  # Convert [0, 15] to [-8, 7]
                         upper_int4 = upper_uint - int4_offset  # Convert [0, 15] to [-8, 7]
-                        
+
                         # Select the appropriate value based on whether j is even (lower) or odd (upper)
                         is_lower = (j % 2) == 0
                         int4_val = T.if_then_else(is_lower, lower_int4, upper_int4)
-                        
+
                         # Mask out-of-bound values to zero
                         in_bounds = (kk < K) & (j < block_K)
                         B_unpacked_local[i, j] = T.if_then_else(in_bounds, int4_val, zero_i8)
-                    
+
                     # Cast int4 -> bf16 (no scale here).
                     for i, j in T.Parallel(block_N, block_K):
                         B_bf16_local[i, j] = B_unpacked_local[i, j].astype(T.float32).astype(T.bfloat16)
@@ -465,7 +466,7 @@ def w4a16_gemm(
 
                     # GEMM (padded with zeros for out-of-range A/B)
                     T.gemm(A_shared, B_bf16_prev_local, C_local, transpose_B=True)
-            
+
             # Apply per-channel scale at output (equivalent to weight-side dequantization):
             # C[m, n] = (A @ q^T)[m, n] * Scales[n]
             if aligned:
@@ -488,7 +489,7 @@ def w4a16_gemm(
                     C_scaled[i, j] = (C_local[i, j] * scale_f32).astype(T.bfloat16)
                     if (m < M) & (n < N):
                         C[m, n] = C_scaled[i, j]
-    
+
     return main
 
 
@@ -504,7 +505,7 @@ def w8a8_gemm(
     threads: int = 128,
 ):
     """W8A8 GEMM kernel: int8 activation × int8 weight matrix multiplication.
-    
+
     Args:
         M: Number of rows in activation matrix A
         N: Number of output channels (rows in weight matrix B)
@@ -514,11 +515,11 @@ def w8a8_gemm(
         block_K: Block size for K dimension
         num_stages: Number of pipeline stages
         threads: Number of threads per block
-    
+
     Returns:
         Compiled TileLang kernel function with signature:
         kernel(A: int8[M, K], B: int8[N, K], C: int32[M, N]) -> None
-        
+
     Note:
         - Input A is int8 quantized activation [M, K]
         - Input B is int8 quantized weight [N, K] (GEMM uses transpose_B=True internally)
@@ -531,12 +532,12 @@ def w8a8_gemm(
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), T.int8),           # quantized activation, shape (M, K)
-        B: T.Tensor((N, K), T.int8),           # quantized weight, shape (N, K)
-        C: T.Tensor((M, N), T.int32),          # output accumulator, shape (M, N)
+        A: T.Tensor((M, K), T.int8),  # quantized activation, shape (M, K)
+        B: T.Tensor((N, K), T.int8),  # quantized weight, shape (N, K)
+        C: T.Tensor((M, N), T.int32),  # output accumulator, shape (M, N)
     ):
         """W8A8 GEMM kernel implementation.
-        
+
         Computes C = A @ B where all inputs are int8 and output is int32.
         This avoids overflow during accumulation by using int32 intermediate results.
         """
@@ -547,19 +548,19 @@ def w8a8_gemm(
             # Allocate shared memory buffers
             A_shared = T.alloc_shared((block_M, block_K), T.int8)
             B_shared = T.alloc_shared((block_N, block_K), T.int8)
-            
+
             # Allocate fragments for pipelining
             A_local = T.alloc_fragment((block_M, block_K), T.int8)
             B_local = T.alloc_fragment((block_N, block_K), T.int8)
             A_local_prev = T.alloc_fragment((block_M, block_K), T.int8)
             B_local_prev = T.alloc_fragment((block_N, block_K), T.int8)
-            
+
             # Allocate fragment for accumulation (use int32 for precision)
             C_local = T.alloc_fragment((block_M, block_N), T.int32)
-            
+
             # Clear accumulation buffer
             T.clear(C_local)
-            
+
             # Pipeline over K dimension
             if aligned:
                 num_k_blocks = K // block_K
@@ -568,15 +569,15 @@ def w8a8_gemm(
                     T.copy(A[by * block_M, k * block_K], A_shared)
                     # B is stored as [N, K]; GEMM uses transpose_B=True.
                     T.copy(B[bx * block_N, k * block_K], B_shared)
-                
+
                     # Copy to local fragments (required for proper pipelining)
                     T.copy(A_shared, A_local)
                     T.copy(B_shared, B_local)
-                
+
                     # Copy to prev_local (required for pipeline synchronization)
                     T.copy(A_local, A_local_prev)
                     T.copy(B_local, B_local_prev)
-                
+
                     # GEMM: C = A @ B^T (int8 x int8 -> int32 accumulation).
                     # Important: use int8 operands; TileLang lowers to the appropriate int8 GEMM path.
                     T.gemm(A_local_prev, B_local_prev, C_local, transpose_B=True)
@@ -613,7 +614,7 @@ def w8a8_gemm(
 
                     # GEMM (padded with zeros for out-of-range A/B)
                     T.gemm(A_local_prev, B_local_prev, C_local, transpose_B=True)
-            
+
             # Store result to output
             if aligned:
                 T.copy(
@@ -629,7 +630,7 @@ def w8a8_gemm(
                     n = bx * block_N + j
                     if (m < M) & (n < N):
                         C[m, n] = C_local[i, j]
-    
+
     return main
 
 
@@ -853,7 +854,7 @@ def w8a8_fused_act_gemm(
 
     This kernel computes per-row scales internally (absmax / 127), quantizes A on the fly,
     then runs int8 GEMM against B (int8) and applies per-row/per-channel scaling.
-    
+
     Optimizations:
     - Removed unnecessary fragment copies (A_local, A_local_prev, B_local, B_local_prev)
     - Direct GEMM from shared memory (A_shared, B_shared -> C_local)
@@ -890,10 +891,12 @@ def w8a8_fused_act_gemm(
             scales_smem = T.alloc_shared((block_M,), T.float32)
 
             # Add swizzled layout for shared memory to reduce bank conflicts
-            T.annotate_layout({
-                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                }
+            )
 
             T.clear(C_local)
             # absmax is non-negative; 0 is a safe initializer for max-reduction.
@@ -1006,7 +1009,7 @@ def w4a8_gemm(
     threads: int = 128,
 ):
     """W4A8 GEMM kernel: int8 activation × int4 weight (packed in int8) matrix multiplication.
-    
+
     Args:
         M: Number of rows in activation matrix A
         N: Number of output channels (rows in weight matrix B)
@@ -1016,11 +1019,11 @@ def w4a8_gemm(
         block_K: Block size for K dimension
         num_stages: Number of pipeline stages
         threads: Number of threads per block
-    
+
     Returns:
         Compiled TileLang kernel function with signature:
         kernel(A: int8[M, K], B_packed: int8[N, (K+1)//2], C: int32[M, N]) -> None
-        
+
     Note:
         - Input A is int8 quantized activation [M, K]
         - Input B_packed is int4 weights packed into int8 format [N, (K+1)//2]
@@ -1033,18 +1036,18 @@ def w4a8_gemm(
     # Fast path: only generate the simple copy-based kernel when all dims are perfectly tiled.
     # Otherwise, generate a masked (tail-safe) kernel to avoid falling back for non-multiple sizes.
     aligned = (M % block_M == 0) and (N % block_N == 0) and (K % block_K == 0)
-    
+
     # Packed size: (K + 1) // 2
     packed_K = (K + 1) // 2
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), T.int8),           # quantized activation, shape (M, K)
-        B_packed: T.Tensor((N, packed_K), T.int8), # packed int4 weight, shape (N, (K+1)//2)
-        C: T.Tensor((M, N), T.int32),          # output accumulator, shape (M, N)
+        A: T.Tensor((M, K), T.int8),  # quantized activation, shape (M, K)
+        B_packed: T.Tensor((N, packed_K), T.int8),  # packed int4 weight, shape (N, (K+1)//2)
+        C: T.Tensor((M, N), T.int32),  # output accumulator, shape (M, N)
     ):
         """W4A8 GEMM kernel implementation.
-        
+
         Computes C = A @ B_unpacked^T where:
         - B_packed[i, j] contains 2 int4 values (packed in int8)
         - Each int4 value is unpacked to q in [-8, 7]
@@ -1053,7 +1056,7 @@ def w4a8_gemm(
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             zero_i8 = tir.const(0, T.int8)
             zero_i32 = tir.const(0, T.int32)
-            
+
             # Constants for int4 unpacking
             int4_offset = tir.const(8, T.int8)  # Offset to convert [0, 15] to [-8, 7]
             mask_lower = tir.const(0x0F, T.int8)  # Mask for lower 4 bits
@@ -1062,35 +1065,35 @@ def w4a8_gemm(
             # Allocate shared memory buffers
             A_shared = T.alloc_shared((block_M, block_K), T.int8)
             B_packed_shared = T.alloc_shared((block_N, (block_K + 1) // 2), T.int8)
-            
+
             # Allocate fragments for pipelining
             A_local = T.alloc_fragment((block_M, block_K), T.int8)
             B_packed_local = T.alloc_fragment((block_N, (block_K + 1) // 2), T.int8)
             B_unpacked_local = T.alloc_fragment((block_N, block_K), T.int8)  # Unpacked int4 (as int8)
             A_local_prev = T.alloc_fragment((block_M, block_K), T.int8)
             B_unpacked_local_prev = T.alloc_fragment((block_N, block_K), T.int8)
-            
+
             # Allocate fragment for accumulation (use int32 for precision)
             C_local = T.alloc_fragment((block_M, block_N), T.int32)
-            
+
             # Clear accumulation buffer
             T.clear(C_local)
-            
+
             # Pipeline over K dimension
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
                     # Load A tile to shared memory
                     T.copy(A[by * block_M, k * block_K], A_shared)
-                    
+
                     # Load B_packed tile to shared memory
                     packed_k_start = (k * block_K) // 2  # Packed index for K dimension
                     T.copy(B_packed[bx * block_N, packed_k_start], B_packed_shared)
-                    
+
                     # Copy to local fragments
                     T.copy(A_shared, A_local)
                     T.copy(B_packed_shared, B_packed_local)
-                    
+
                     # Unpack int4 from packed int8
                     for i, j in T.Parallel(block_N, block_K):
                         j_packed = j // 2
@@ -1105,7 +1108,7 @@ def w4a8_gemm(
                     # Copy to prev_local (required for pipeline synchronization)
                     T.copy(A_local, A_local_prev)
                     T.copy(B_unpacked_local, B_unpacked_local_prev)
-                    
+
                     # GEMM: C = A @ B_unpacked^T (int8 x int8 -> int32 accumulation).
                     # Use int8 operands; TileLang lowers to the proper int8 GEMM path.
                     T.gemm(A_local_prev, B_unpacked_local_prev, C_local, transpose_B=True)
@@ -1137,23 +1140,23 @@ def w4a8_gemm(
                     # Copy to local fragments
                     T.copy(A_shared, A_local)
                     T.copy(B_packed_shared, B_packed_local)
-                    
+
                     # Unpack int4 from int8 with boundary checks
                     for i, j in T.Parallel(block_N, block_K):
                         kk = k * block_K + j
                         j_packed = j // 2
                         packed_byte = B_packed_local[i, j_packed]
-                        
+
                         # Extract both lower and upper 4 bits
                         lower_uint = (packed_byte & mask_lower).astype(T.int8)
                         upper_uint = ((packed_byte >> mask_upper_shift) & mask_lower).astype(T.int8)
                         lower_int4 = lower_uint - int4_offset
                         upper_int4 = upper_uint - int4_offset
-                        
+
                         # Select the appropriate value based on whether j is even (lower) or odd (upper)
                         is_lower = (j % 2) == 0
                         int4_val = T.if_then_else(is_lower, lower_int4, upper_int4)
-                        
+
                         # Mask out-of-bound values to zero
                         in_bounds = (kk < K) & (j < block_K)
                         B_unpacked_local[i, j] = T.if_then_else(in_bounds, int4_val, zero_i8)
@@ -1164,7 +1167,7 @@ def w4a8_gemm(
 
                     # GEMM (padded with zeros for out-of-range A/B)
                     T.gemm(A_local_prev, B_unpacked_local_prev, C_local, transpose_B=True)
-            
+
             # Store result to output
             if aligned:
                 T.copy(
@@ -1180,7 +1183,7 @@ def w4a8_gemm(
                     n = bx * block_N + j
                     if (m < M) & (n < N):
                         C[m, n] = C_local[i, j]
-    
+
     return main
 
 
@@ -1347,7 +1350,7 @@ def w4a8_fused_act_gemm(
 
     This kernel computes per-row scales internally (absmax / 127), quantizes A on the fly,
     unpacks packed int4 weights, then applies fused scaling.
-    
+
     Optimizations:
     - Reduced fragment copies: unpack B directly in shared memory
     - Added swizzled layout for shared memory
@@ -1389,10 +1392,12 @@ def w4a8_fused_act_gemm(
             scales_smem = T.alloc_shared((block_M,), T.float32)
 
             # Add swizzled layout for shared memory
-            T.annotate_layout({
-                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                B_unpacked_shared: tilelang.layout.make_swizzled_layout(B_unpacked_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                    B_unpacked_shared: tilelang.layout.make_swizzled_layout(B_unpacked_shared),
+                }
+            )
 
             T.clear(C_local)
             # absmax is non-negative; 0 is a safe initializer for max-reduction.
@@ -1562,12 +1567,12 @@ def fp8_e4m3_w8a16_gemm(
             B_local = T.alloc_fragment((block_N, block_K), T.float8_e4m3fn)
             B_bf16_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
             B_bf16_prev_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
-            
+
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
             C_scaled = T.alloc_fragment((block_M, block_N), T.bfloat16)
-            
+
             T.clear(C_local)
-            
+
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
@@ -1600,13 +1605,19 @@ def fp8_e4m3_w8a16_gemm(
 
                     T.copy(B_bf16_local, B_bf16_prev_local)
                     T.gemm(A_shared, B_bf16_prev_local, C_local, transpose_B=True)
-            
+
             # Apply per-channel scale at output: C[m, n] = (A @ q_fp8^T)[m, n] * Scales[n]
             if aligned:
                 for i, j in T.Parallel(block_M, block_N):
                     scale_f32 = Scales[bx * block_N + j]
                     C_scaled[i, j] = (C_local[i, j] * scale_f32).astype(T.bfloat16)
-                T.copy(C_scaled, C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N])
+                T.copy(
+                    C_scaled,
+                    C[
+                        by * block_M : (by + 1) * block_M,
+                        bx * block_N : (bx + 1) * block_N,
+                    ],
+                )
             else:
                 for i, j in T.Parallel(block_M, block_N):
                     m = by * block_M + i
@@ -1615,7 +1626,7 @@ def fp8_e4m3_w8a16_gemm(
                     val = (C_local[i, j] * scale_f32).astype(T.bfloat16)
                     if (m < M) & (n < N):
                         C[m, n] = val
-    
+
     return main
 
 
@@ -1652,12 +1663,12 @@ def fp8_e5m2_w8a16_gemm(
             B_local = T.alloc_fragment((block_N, block_K), T.float8_e5m2)
             B_bf16_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
             B_bf16_prev_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
-            
+
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
             C_scaled = T.alloc_fragment((block_M, block_N), T.bfloat16)
-            
+
             T.clear(C_local)
-            
+
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
@@ -1689,12 +1700,18 @@ def fp8_e5m2_w8a16_gemm(
 
                     T.copy(B_bf16_local, B_bf16_prev_local)
                     T.gemm(A_shared, B_bf16_prev_local, C_local, transpose_B=True)
-            
+
             if aligned:
                 for i, j in T.Parallel(block_M, block_N):
                     scale_f32 = Scales[bx * block_N + j]
                     C_scaled[i, j] = (C_local[i, j] * scale_f32).astype(T.bfloat16)
-                T.copy(C_scaled, C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N])
+                T.copy(
+                    C_scaled,
+                    C[
+                        by * block_M : (by + 1) * block_M,
+                        bx * block_N : (bx + 1) * block_N,
+                    ],
+                )
             else:
                 for i, j in T.Parallel(block_M, block_N):
                     m = by * block_M + i
@@ -1703,7 +1720,7 @@ def fp8_e5m2_w8a16_gemm(
                     val = (C_local[i, j] * scale_f32).astype(T.bfloat16)
                     if (m < M) & (n < N):
                         C[m, n] = val
-    
+
     return main
 
 
@@ -1737,12 +1754,12 @@ def fp8_e4m3_w8a8_gemm(
 
             A_shared = T.alloc_shared((block_M, block_K), T.float8_e4m3fn)
             B_shared = T.alloc_shared((block_N, block_K), T.float8_e4m3fn)
-            
+
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
             C_out = T.alloc_fragment((block_M, block_N), T.bfloat16)
-            
+
             T.clear(C_local)
-            
+
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
@@ -1762,7 +1779,7 @@ def fp8_e4m3_w8a8_gemm(
                         B_shared[i, j] = T.if_then_else((n < N) & (kk < K), B[n, kk], zero_fp8)
 
                     T.gemm(A_shared, B_shared, C_local, transpose_B=True)
-            
+
             # Fused scaling + store: C = (A@B^T) * x_scale[m] * w_scale[n]
             if aligned:
                 for i, j in T.Parallel(block_M, block_N):
@@ -1771,7 +1788,13 @@ def fp8_e4m3_w8a8_gemm(
                     x_s = XScales[m]
                     w_s = WScales[n].astype(T.float32)
                     C_out[i, j] = (C_local[i, j] * x_s * w_s).astype(T.bfloat16)
-                T.copy(C_out, C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N])
+                T.copy(
+                    C_out,
+                    C[
+                        by * block_M : (by + 1) * block_M,
+                        bx * block_N : (bx + 1) * block_N,
+                    ],
+                )
             else:
                 for i, j in T.Parallel(block_M, block_N):
                     m = by * block_M + i
@@ -1782,7 +1805,7 @@ def fp8_e4m3_w8a8_gemm(
                     val = (C_local[i, j] * x_s * w_s).astype(T.bfloat16)
                     if (m < M) & (n < N):
                         C[m, n] = val
-    
+
     return main
 
 
@@ -1816,12 +1839,12 @@ def fp8_e5m2_w8a8_gemm(
 
             A_shared = T.alloc_shared((block_M, block_K), T.float8_e5m2)
             B_shared = T.alloc_shared((block_N, block_K), T.float8_e5m2)
-            
+
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
             C_out = T.alloc_fragment((block_M, block_N), T.bfloat16)
-            
+
             T.clear(C_local)
-            
+
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
@@ -1841,7 +1864,7 @@ def fp8_e5m2_w8a8_gemm(
                         B_shared[i, j] = T.if_then_else((n < N) & (kk < K), B[n, kk], zero_fp8)
 
                     T.gemm(A_shared, B_shared, C_local, transpose_B=True)
-            
+
             if aligned:
                 for i, j in T.Parallel(block_M, block_N):
                     m = by * block_M + i
@@ -1849,7 +1872,13 @@ def fp8_e5m2_w8a8_gemm(
                     x_s = XScales[m]
                     w_s = WScales[n].astype(T.float32)
                     C_out[i, j] = (C_local[i, j] * x_s * w_s).astype(T.bfloat16)
-                T.copy(C_out, C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N])
+                T.copy(
+                    C_out,
+                    C[
+                        by * block_M : (by + 1) * block_M,
+                        bx * block_N : (bx + 1) * block_N,
+                    ],
+                )
             else:
                 for i, j in T.Parallel(block_M, block_N):
                     m = by * block_M + i
@@ -1860,7 +1889,7 @@ def fp8_e5m2_w8a8_gemm(
                     val = (C_local[i, j] * x_s * w_s).astype(T.bfloat16)
                     if (m < M) & (n < N):
                         C[m, n] = val
-    
+
     return main
 
 
@@ -1879,7 +1908,7 @@ def gptq_w4a16_gemm(
     threads: int = 128,
 ):
     """GPTQ W4A16 GEMM kernel: bf16 activation × GPTQ int4 weight (packed in int8, groupwise dequantized).
-    
+
     Args:
         M: Number of rows in activation matrix A
         N: Number of output channels (rows in weight matrix B)
@@ -1891,10 +1920,10 @@ def gptq_w4a16_gemm(
         block_K: Block size for K dimension
         num_stages: Number of pipeline stages
         threads: Number of threads per block
-    
+
     Returns:
         Compiled TileLang kernel function with signature:
-        kernel(A: bf16[M, K], QWeight: int8[N, (K+1)//2], QZeros: int8[num_groups, (K+1)//2], 
+        kernel(A: bf16[M, K], QWeight: int8[N, (K+1)//2], QZeros: int8[num_groups, (K+1)//2],
                Scales: float32[num_groups, K], GIdx: int32[N], C: bf16[M, N]) -> None
     """
     aligned = (M % block_M == 0) and (N % block_N == 0) and (K % block_K == 0)
@@ -1914,7 +1943,7 @@ def gptq_w4a16_gemm(
             zero_i8 = tir.const(0, T.int8)
             zero_bf16 = tir.const(0, T.bfloat16)
             zero_f32 = tir.const(0, T.float32)
-            
+
             # Constants for int4 unpacking
             int4_offset = tir.const(8, T.int8)
             mask_lower = tir.const(0x0F, T.int8)
@@ -1924,7 +1953,7 @@ def gptq_w4a16_gemm(
             A_shared = T.alloc_shared((block_M, block_K), T.bfloat16)
             QWeight_shared = T.alloc_shared((block_N, (block_K + 1) // 2), T.int8)
             QZeros_shared = T.alloc_shared((num_groups, (block_K + 1) // 2), T.int8)
-            
+
             # Allocate fragments
             QWeight_local = T.alloc_fragment((block_N, (block_K + 1) // 2), T.int8)
             QZeros_local = T.alloc_fragment((num_groups, (block_K + 1) // 2), T.int8)
@@ -1932,28 +1961,28 @@ def gptq_w4a16_gemm(
             Z_unpacked_local = T.alloc_fragment((num_groups, block_K), T.int8)
             W_dequant_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
             W_dequant_prev_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
-            
+
             # Allocate fragment for accumulation
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
-            
+
             # Clear accumulation buffer
             T.clear(C_local)
-            
+
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
                     # Load A tile
                     T.copy(A[by * block_M, k * block_K], A_shared)
-                    
+
                     # Load QWeight and QZeros tiles
                     packed_k_start = (k * block_K) // 2
                     T.copy(QWeight[bx * block_N, packed_k_start], QWeight_shared)
                     T.copy(QZeros[0:num_groups, packed_k_start], QZeros_shared)
-                    
+
                     # Copy to local fragments
                     T.copy(QWeight_shared, QWeight_local)
                     T.copy(QZeros_shared, QZeros_local)
-                    
+
                     # Unpack QWeight int4 -> int8
                     for i, j in T.Parallel(block_N, block_K):
                         j_packed = j // 2
@@ -1964,7 +1993,7 @@ def gptq_w4a16_gemm(
                         upper_int4 = upper_uint - int4_offset
                         is_lower = (j % 2) == 0
                         W_unpacked_local[i, j] = T.if_then_else(is_lower, lower_int4, upper_int4)
-                    
+
                     # Unpack QZeros int4 -> int8
                     for g, j in T.Parallel(num_groups, block_K):
                         j_packed = j // 2
@@ -1975,7 +2004,7 @@ def gptq_w4a16_gemm(
                         upper_int4 = upper_uint - int4_offset
                         is_lower = (j % 2) == 0
                         Z_unpacked_local[g, j] = T.if_then_else(is_lower, lower_int4, upper_int4)
-                    
+
                     # Dequantize weights: weight = quantized_int4 * scale + zero
                     # where zero = zero_quantized_int4 * scale
                     for i, j in T.Parallel(block_N, block_K):
@@ -1985,20 +2014,20 @@ def gptq_w4a16_gemm(
                         group_id = GIdx[n]
                         group_id = T.if_then_else(group_id < 0, 0, group_id)
                         group_id = T.if_then_else(group_id >= num_groups, num_groups - 1, group_id)
-                        
+
                         # Get scale and zero_quantized
                         scale = Scales[group_id, kk]
                         zero_quantized = Z_unpacked_local[group_id, j].astype(T.float32)
                         weight_quantized = W_unpacked_local[i, j].astype(T.float32)
-                        
+
                         # Dequantize: weight = weight_quantized * scale + zero_quantized * scale
                         zero = zero_quantized * scale
                         weight_dequant = weight_quantized * scale + zero
                         W_dequant_local[i, j] = weight_dequant.astype(T.bfloat16)
-                    
+
                     # Copy to prev_local for pipeline synchronization
                     T.copy(W_dequant_local, W_dequant_prev_local)
-                    
+
                     # GEMM: C = A @ W_dequant^T
                     T.gemm(A_shared, W_dequant_prev_local, C_local, transpose_B=True)
             else:
@@ -2009,7 +2038,7 @@ def gptq_w4a16_gemm(
                         m = by * block_M + i
                         kk = k * block_K + j
                         A_shared[i, j] = T.if_then_else((m < M) & (kk < K), A[m, kk], zero_bf16)
-                    
+
                     # Masked load QWeight
                     packed_k_start = (k * block_K) // 2
                     packed_k_size = (block_K + 1) // 2
@@ -2021,7 +2050,7 @@ def gptq_w4a16_gemm(
                             QWeight[n, packed_idx],
                             zero_i8,
                         )
-                    
+
                     # Masked load QZeros
                     for g, j_packed in T.Parallel(num_groups, packed_k_size):
                         packed_idx = packed_k_start + j_packed
@@ -2030,11 +2059,11 @@ def gptq_w4a16_gemm(
                             QZeros[g, packed_idx],
                             zero_i8,
                         )
-                    
+
                     # Copy to local fragments
                     T.copy(QWeight_shared, QWeight_local)
                     T.copy(QZeros_shared, QZeros_local)
-                    
+
                     # Unpack QWeight with boundary checks
                     for i, j in T.Parallel(block_N, block_K):
                         kk = k * block_K + j
@@ -2048,7 +2077,7 @@ def gptq_w4a16_gemm(
                         int4_val = T.if_then_else(is_lower, lower_int4, upper_int4)
                         in_bounds = (kk < K) & (j < block_K)
                         W_unpacked_local[i, j] = T.if_then_else(in_bounds, int4_val, zero_i8)
-                    
+
                     # Unpack QZeros with boundary checks
                     for g, j in T.Parallel(num_groups, block_K):
                         kk = k * block_K + j
@@ -2062,7 +2091,7 @@ def gptq_w4a16_gemm(
                         int4_val = T.if_then_else(is_lower, lower_int4, upper_int4)
                         in_bounds = (kk < K) & (j < block_K) & (g < num_groups)
                         Z_unpacked_local[g, j] = T.if_then_else(in_bounds, int4_val, zero_i8)
-                    
+
                     # Dequantize weights with boundary checks
                     for i, j in T.Parallel(block_N, block_K):
                         n = bx * block_N + i
@@ -2086,18 +2115,14 @@ def gptq_w4a16_gemm(
                         # Dequantize
                         zero = zero_quantized * scale
                         weight_dequant = weight_quantized * scale + zero
-                        W_dequant_local[i, j] = T.if_then_else(
-                            in_bounds,
-                            weight_dequant.astype(T.bfloat16),
-                            zero_bf16
-                        )
-                    
+                        W_dequant_local[i, j] = T.if_then_else(in_bounds, weight_dequant.astype(T.bfloat16), zero_bf16)
+
                     # Copy to prev_local
                     T.copy(W_dequant_local, W_dequant_prev_local)
-                    
+
                     # GEMM
                     T.gemm(A_shared, W_dequant_prev_local, C_local, transpose_B=True)
-            
+
             # Store output
             if aligned:
                 for i, j in T.Parallel(block_M, block_N):
@@ -2110,7 +2135,7 @@ def gptq_w4a16_gemm(
                     n = bx * block_N + j
                     if (m < M) & (n < N):
                         C[m, n] = C_local[i, j].astype(T.bfloat16)
-    
+
     return main
 
 
@@ -2129,7 +2154,7 @@ def awq_w4a16_gemm(
     threads: int = 128,
 ):
     """AWQ W4A16 GEMM kernel: bf16 activation × AWQ int4 weight (packed in int8, groupwise dequantized).
-    
+
     Args:
         M: Number of rows in activation matrix A
         N: Number of output channels (rows in weight matrix B)
@@ -2141,10 +2166,10 @@ def awq_w4a16_gemm(
         block_K: Block size for K dimension
         num_stages: Number of pipeline stages
         threads: Number of threads per block
-    
+
     Returns:
         Compiled TileLang kernel function with signature:
-        kernel(A: bf16[M, K], QWeight: int8[N, (K+1)//2], QZeros: int8[num_groups, (K+1)//2], 
+        kernel(A: bf16[M, K], QWeight: int8[N, (K+1)//2], QZeros: int8[num_groups, (K+1)//2],
                Scales: float32[num_groups, K], C: bf16[M, N]) -> None
     """
     aligned = (M % block_M == 0) and (N % block_N == 0) and (K % block_K == 0)
@@ -2163,7 +2188,7 @@ def awq_w4a16_gemm(
             zero_i8 = tir.const(0, T.int8)
             zero_bf16 = tir.const(0, T.bfloat16)
             zero_f32 = tir.const(0, T.float32)
-            
+
             # Constants for int4 unpacking
             int4_offset = tir.const(8, T.int8)
             mask_lower = tir.const(0x0F, T.int8)
@@ -2173,7 +2198,7 @@ def awq_w4a16_gemm(
             A_shared = T.alloc_shared((block_M, block_K), T.bfloat16)
             QWeight_shared = T.alloc_shared((block_N, (block_K + 1) // 2), T.int8)
             QZeros_shared = T.alloc_shared((num_groups, (block_K + 1) // 2), T.int8)
-            
+
             # Allocate fragments
             QWeight_local = T.alloc_fragment((block_N, (block_K + 1) // 2), T.int8)
             QZeros_local = T.alloc_fragment((num_groups, (block_K + 1) // 2), T.int8)
@@ -2181,28 +2206,28 @@ def awq_w4a16_gemm(
             Z_unpacked_local = T.alloc_fragment((num_groups, block_K), T.int8)
             W_dequant_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
             W_dequant_prev_local = T.alloc_fragment((block_N, block_K), T.bfloat16)
-            
+
             # Allocate fragment for accumulation
             C_local = T.alloc_fragment((block_M, block_N), T.float32)
-            
+
             # Clear accumulation buffer
             T.clear(C_local)
-            
+
             if aligned:
                 num_k_blocks = K // block_K
                 for k in T.Pipelined(num_k_blocks, num_stages=num_stages):
                     # Load A tile
                     T.copy(A[by * block_M, k * block_K], A_shared)
-                    
+
                     # Load QWeight and QZeros tiles
                     packed_k_start = (k * block_K) // 2
                     T.copy(QWeight[bx * block_N, packed_k_start], QWeight_shared)
                     T.copy(QZeros[0:num_groups, packed_k_start], QZeros_shared)
-                    
+
                     # Copy to local fragments
                     T.copy(QWeight_shared, QWeight_local)
                     T.copy(QZeros_shared, QZeros_local)
-                    
+
                     # Unpack QWeight int4 -> int8
                     for i, j in T.Parallel(block_N, block_K):
                         j_packed = j // 2
@@ -2213,7 +2238,7 @@ def awq_w4a16_gemm(
                         upper_int4 = upper_uint - int4_offset
                         is_lower = (j % 2) == 0
                         W_unpacked_local[i, j] = T.if_then_else(is_lower, lower_int4, upper_int4)
-                    
+
                     # Unpack QZeros int4 -> int8
                     for g, j in T.Parallel(num_groups, block_K):
                         j_packed = j // 2
@@ -2224,7 +2249,7 @@ def awq_w4a16_gemm(
                         upper_int4 = upper_uint - int4_offset
                         is_lower = (j % 2) == 0
                         Z_unpacked_local[g, j] = T.if_then_else(is_lower, lower_int4, upper_int4)
-                    
+
                     # Dequantize weights: weight = quantized_int4 * scale + zero
                     # where zero = zero_quantized_int4 * scale
                     # AWQ uses sequential grouping: group_id = n // group_size
@@ -2236,20 +2261,20 @@ def awq_w4a16_gemm(
                         # Clamp to [0, num_groups-1]
                         group_id = T.if_then_else(group_id < 0, 0, group_id)
                         group_id = T.if_then_else(group_id >= num_groups, num_groups - 1, group_id)
-                        
+
                         # Get scale and zero_quantized
                         scale = Scales[group_id, kk]
                         zero_quantized = Z_unpacked_local[group_id, j].astype(T.float32)
                         weight_quantized = W_unpacked_local[i, j].astype(T.float32)
-                        
+
                         # Dequantize: weight = weight_quantized * scale + zero_quantized * scale
                         zero = zero_quantized * scale
                         weight_dequant = weight_quantized * scale + zero
                         W_dequant_local[i, j] = weight_dequant.astype(T.bfloat16)
-                    
+
                     # Copy to prev_local for pipeline synchronization
                     T.copy(W_dequant_local, W_dequant_prev_local)
-                    
+
                     # GEMM: C = A @ W_dequant^T
                     T.gemm(A_shared, W_dequant_prev_local, C_local, transpose_B=True)
             else:
@@ -2260,7 +2285,7 @@ def awq_w4a16_gemm(
                         m = by * block_M + i
                         kk = k * block_K + j
                         A_shared[i, j] = T.if_then_else((m < M) & (kk < K), A[m, kk], zero_bf16)
-                    
+
                     # Masked load QWeight
                     packed_k_start = (k * block_K) // 2
                     packed_k_size = (block_K + 1) // 2
@@ -2272,7 +2297,7 @@ def awq_w4a16_gemm(
                             QWeight[n, packed_idx],
                             zero_i8,
                         )
-                    
+
                     # Masked load QZeros
                     for g, j_packed in T.Parallel(num_groups, packed_k_size):
                         packed_idx = packed_k_start + j_packed
@@ -2281,11 +2306,11 @@ def awq_w4a16_gemm(
                             QZeros[g, packed_idx],
                             zero_i8,
                         )
-                    
+
                     # Copy to local fragments
                     T.copy(QWeight_shared, QWeight_local)
                     T.copy(QZeros_shared, QZeros_local)
-                    
+
                     # Unpack QWeight with boundary checks
                     for i, j in T.Parallel(block_N, block_K):
                         kk = k * block_K + j
@@ -2299,7 +2324,7 @@ def awq_w4a16_gemm(
                         int4_val = T.if_then_else(is_lower, lower_int4, upper_int4)
                         in_bounds = (kk < K) & (j < block_K)
                         W_unpacked_local[i, j] = T.if_then_else(in_bounds, int4_val, zero_i8)
-                    
+
                     # Unpack QZeros with boundary checks
                     for g, j in T.Parallel(num_groups, block_K):
                         kk = k * block_K + j
@@ -2313,7 +2338,7 @@ def awq_w4a16_gemm(
                         int4_val = T.if_then_else(is_lower, lower_int4, upper_int4)
                         in_bounds = (kk < K) & (j < block_K) & (g < num_groups)
                         Z_unpacked_local[g, j] = T.if_then_else(in_bounds, int4_val, zero_i8)
-                    
+
                     # Dequantize weights with boundary checks
                     # AWQ uses sequential grouping: group_id = n // group_size
                     for i, j in T.Parallel(block_N, block_K):
@@ -2325,27 +2350,23 @@ def awq_w4a16_gemm(
                         # Clamp to [0, num_groups-1]
                         group_id = T.if_then_else(group_id < 0, 0, group_id)
                         group_id = T.if_then_else(group_id >= num_groups, num_groups - 1, group_id)
-                        
+
                         # Get scale and zero_quantized
                         scale = T.if_then_else(in_bounds, Scales[group_id, kk], zero_f32)
                         zero_quantized = Z_unpacked_local[group_id, j].astype(T.float32)
                         weight_quantized = W_unpacked_local[i, j].astype(T.float32)
-                        
+
                         # Dequantize
                         zero = zero_quantized * scale
                         weight_dequant = weight_quantized * scale + zero
-                        W_dequant_local[i, j] = T.if_then_else(
-                            in_bounds,
-                            weight_dequant.astype(T.bfloat16),
-                            zero_bf16
-                        )
-                    
+                        W_dequant_local[i, j] = T.if_then_else(in_bounds, weight_dequant.astype(T.bfloat16), zero_bf16)
+
                     # Copy to prev_local
                     T.copy(W_dequant_local, W_dequant_prev_local)
-                    
+
                     # GEMM
                     T.gemm(A_shared, W_dequant_prev_local, C_local, transpose_B=True)
-            
+
             # Store output
             if aligned:
                 for i, j in T.Parallel(block_M, block_N):
@@ -2358,5 +2379,5 @@ def awq_w4a16_gemm(
                     n = bx * block_N + j
                     if (m < M) & (n < N):
                         C[m, n] = C_local[i, j].astype(T.bfloat16)
-    
+
     return main
