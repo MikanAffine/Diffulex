@@ -19,85 +19,90 @@ except ImportError:
 def config_to_model_args(config: BenchmarkConfig) -> str:
     """
     Convert BenchmarkConfig to lm_eval model_args string format
-    
+
     Args:
         config: Benchmark configuration
-        
+
     Returns:
         Model arguments string in key=value format
     """
     engine = config.engine
     eval_config = config.eval
-    
+
     args_dict = {
-        'pretrained': engine.model_path,
-        'model_name': engine.model_name,
-        'decoding_strategy': engine.decoding_strategy,
-        'mask_token_id': engine.mask_token_id,
-        'tensor_parallel_size': engine.tensor_parallel_size,
-        'data_parallel_size': engine.data_parallel_size,
-        'gpu_memory_utilization': engine.gpu_memory_utilization,
-        'max_model_len': engine.max_model_len,
-        'max_num_batched_tokens': engine.max_num_batched_tokens,
-        'max_num_reqs': engine.max_num_reqs,
-        'temperature': eval_config.temperature,
-        'max_new_tokens': eval_config.max_tokens,
-        'use_lora': engine.use_lora,
-        'enforce_eager': engine.enforce_eager,
-        'kv_cache_layout': engine.kv_cache_layout,
-        'diffusion_block_size': engine.diffusion_block_size,
-        'wait_ready': True,
+        "pretrained": engine.model_path,
+        "model_name": engine.model_name,
+        "decoding_strategy": engine.decoding_strategy,
+        "mask_token_id": engine.mask_token_id,
+        "tensor_parallel_size": engine.tensor_parallel_size,
+        "data_parallel_size": engine.data_parallel_size,
+        "gpu_memory_utilization": engine.gpu_memory_utilization,
+        "max_model_len": engine.max_model_len,
+        "max_num_batched_tokens": engine.max_num_batched_tokens,
+        "max_num_reqs": engine.max_num_reqs,
+        "temperature": eval_config.temperature,
+        "max_new_tokens": eval_config.max_tokens,
+        "use_lora": engine.use_lora,
+        "pre_merge_lora": engine.pre_merge_lora,
+        "enforce_eager": engine.enforce_eager,
+        "kv_cache_layout": engine.kv_cache_layout,
+        "block_size": engine.block_size,
+        "buffer_size": engine.buffer_size,
+        "wait_ready": True,
     }
     dt = engine.decoding_thresholds or {
-        'add_block_threshold': 0.1,
-        'semi_complete_threshold': 0.9,
-        'decoding_threshold': 0.9,
+        "add_block_threshold": 0.1,
+        "semi_complete_threshold": 0.9,
+        "decoding_threshold": 0.9,
     }
-    args_dict['add_block_threshold'] = dt['add_block_threshold']
-    args_dict['semi_complete_threshold'] = dt['semi_complete_threshold']
-    args_dict['decoding_threshold'] = dt['decoding_threshold']
-    
+    args_dict["add_block_threshold"] = dt["add_block_threshold"]
+    args_dict["semi_complete_threshold"] = dt["semi_complete_threshold"]
+    args_dict["decoding_threshold"] = dt["decoding_threshold"]
+
     # Add quantization parameters if specified
     if engine.kv_cache_dtype is not None:
-        args_dict['kv_cache_dtype'] = engine.kv_cache_dtype
+        args_dict["kv_cache_dtype"] = engine.kv_cache_dtype
     if engine.decode_mode is not None:
-        args_dict['decode_mode'] = engine.decode_mode
+        args_dict["decode_mode"] = engine.decode_mode
     if engine.linear_attn_weight_dtype is not None:
-        args_dict['linear_attn_weight_dtype'] = engine.linear_attn_weight_dtype
+        args_dict["linear_attn_weight_dtype"] = engine.linear_attn_weight_dtype
     if engine.linear_mlp_weight_dtype is not None:
-        args_dict['linear_mlp_weight_dtype'] = engine.linear_mlp_weight_dtype
+        args_dict["linear_mlp_weight_dtype"] = engine.linear_mlp_weight_dtype
     if engine.linear_attn_act_dtype is not None:
-        args_dict['linear_attn_act_dtype'] = engine.linear_attn_act_dtype
+        args_dict["linear_attn_act_dtype"] = engine.linear_attn_act_dtype
     if engine.linear_mlp_act_dtype is not None:
-        args_dict['linear_mlp_act_dtype'] = engine.linear_mlp_act_dtype
-    
+        args_dict["linear_mlp_act_dtype"] = engine.linear_mlp_act_dtype
+
     if engine.tokenizer_path:
-        args_dict['tokenizer_path'] = engine.tokenizer_path
-    
+        args_dict["tokenizer_path"] = engine.tokenizer_path
+
     if engine.use_lora and engine.lora_path:
-        args_dict['lora_path'] = engine.lora_path
+        args_dict["lora_path"] = engine.lora_path
 
     if eval_config.save_results and eval_config.output_dir:
-        args_dict['save_dir'] = eval_config.output_dir
+        args_dict["save_dir"] = eval_config.output_dir
+
+    if eval_config.add_bos_token is not None:
+        args_dict["add_bos_token"] = eval_config.add_bos_token
 
     # Convert to string format: key1=value1,key2=value2
     args_list = [f"{k}={v}" for k, v in args_dict.items()]
-    return ','.join(args_list)
+    return ",".join(args_list)
 
 
 def dataset_name_to_tasks(dataset_name: str) -> str:
     """
     Convert dataset name to lm_eval task name
-    
+
     Args:
         dataset_name: Dataset name (e.g., "gsm8k", "humaneval")
-        
+
     Returns:
         lm_eval task name
     """
     mapping = {
-        'gsm8k': 'gsm8k',
-        'humaneval': 'humaneval',
+        "gsm8k": "gsm8k",
+        "humaneval": "humaneval",
     }
     return mapping.get(dataset_name, dataset_name)
 
@@ -105,73 +110,75 @@ def dataset_name_to_tasks(dataset_name: str) -> str:
 def run_benchmark(config: BenchmarkConfig) -> None:
     """
     Run benchmark using lm-evaluation-harness
-    
+
     Args:
         config: Benchmark configuration
     """
     logger = get_logger(__name__)
-    
+
     if cli_evaluate is None:
-        logger.error(
-            "lm-evaluation-harness is not installed. "
-            "Please install it with: pip install lm-eval"
-        )
+        logger.error("lm-evaluation-harness is not installed. Please install it with: pip install lm-eval")
         sys.exit(1)
-    
+
     benchmark_info = [
-        '=' * 80, 
-        'Diffulex Benchmark (using lm-evaluation-harness)',
-        '=' * 80,
-        f'Model: {config.engine.model_path}',
-        f'Model Name: {config.engine.model_name}',
-        f'Decoding Strategy: {config.engine.decoding_strategy}',
-        f'Tasks: {config.eval.dataset_name}',
-        f'Output Directory: {config.eval.output_dir}',
-        '=' * 80,
+        "=" * 80,
+        "Diffulex Benchmark (using lm-evaluation-harness)",
+        "=" * 80,
+        f"Model: {config.engine.model_path}",
+        f"Model Name: {config.engine.model_name}",
+        f"Decoding Strategy: {config.engine.decoding_strategy}",
+        f"Tasks: {config.eval.dataset_name}",
+        f"Output Directory: {config.eval.output_dir}",
+        "=" * 80,
     ]
-    logger.info('\n'.join(benchmark_info))
-    
+    logger.info("\n".join(benchmark_info))
+
     # Convert config to lm_eval arguments
     model_args = config_to_model_args(config)
     tasks = dataset_name_to_tasks(config.eval.dataset_name)
-    
+
     # Prepare sys.argv for lm_eval
     original_argv = sys.argv.copy()
-    
+
     try:
         sys.argv = [
             "lm_eval",
-            "--model", "diffulex",
-            "--model_args", model_args,
-            "--tasks", tasks,
-            "--batch_size", "1",
-            "--output_path", config.eval.output_dir,
+            "--model",
+            "diffulex",
+            "--model_args",
+            model_args,
+            "--tasks",
+            tasks,
+            "--batch_size",
+            "1",
+            "--output_path",
+            config.eval.output_dir,
         ]
-        
+
         if config.eval.dataset_limit:
             sys.argv.extend(["--limit", str(config.eval.dataset_limit)])
 
         if config.eval.save_results:
             sys.argv.extend(["--log_samples"])
-        
+
         # Add any additional lm_eval arguments from config if needed
         # For now, we use default batch_size=1
-        
+
         lm_eval_info = [
-            '=' * 80,
-            'Starting lm-evaluation-harness evaluation...',
-            '=' * 80,
-            f'Model args: {model_args}',
-            f'Tasks: {tasks}',
-            '=' * 80,
+            "=" * 80,
+            "Starting lm-evaluation-harness evaluation...",
+            "=" * 80,
+            f"Model args: {model_args}",
+            f"Tasks: {tasks}",
+            "=" * 80,
         ]
-        logger.info('\n'.join(lm_eval_info))
-        
+        logger.info("\n".join(lm_eval_info))
+
         # Run lm_eval
         cli_evaluate()
-        
+
         logger.success("Evaluation completed successfully")
-        
+
     except Exception as e:
         logger.error(f"Evaluation failed: {e}", exc_info=True)
         sys.exit(1)
@@ -183,15 +190,22 @@ def run_benchmark(config: BenchmarkConfig) -> None:
 def load_config_from_args(args) -> BenchmarkConfig:
     """
     Load configuration from command line arguments
-    
+
     Args:
         args: Parsed command line arguments
-        
+
     Returns:
         BenchmarkConfig instance
     """
     logger = get_logger(__name__)
-    
+    if getattr(args, "max_num_reqs", None) is None and getattr(args, "max_num_seqs", None) is not None:
+        logger.warning(
+            "--max-num-seqs is deprecated and will be removed in a future release; please use --max-num-reqs instead."
+        )
+    max_num_reqs = (
+        args.max_num_reqs if getattr(args, "max_num_reqs", None) is not None else getattr(args, "max_num_seqs", None)
+    )
+
     # Try to load from config file
     if args.config:
         config_path = Path(args.config)
@@ -203,17 +217,17 @@ def load_config_from_args(args) -> BenchmarkConfig:
             logger.info(f"Using default config: {config_path}")
         else:
             config_path = None
-    
+
     if config_path and config_path.exists():
-        if config_path.suffix in ['.yaml', '.yml']:
+        if config_path.suffix in [".yaml", ".yml"]:
             config = BenchmarkConfig.from_yaml(str(config_path))
-        elif config_path.suffix == '.json':
+        elif config_path.suffix == ".json":
             config = BenchmarkConfig.from_json(str(config_path))
         else:
             logger.error(f"Unsupported config file format: {config_path.suffix}")
             sys.exit(1)
         logger.info(f"Loaded configuration from: {config_path}")
-        
+
         # Override with command line arguments if provided
         if args.model_path:
             config.engine.model_path = args.model_path
@@ -241,15 +255,19 @@ def load_config_from_args(args) -> BenchmarkConfig:
             config.engine.kv_cache_dtype = args.kv_cache_dtype
         if getattr(args, "max_model_len", None) is not None:
             config.engine.max_model_len = args.max_model_len
-        if getattr(args, "max_num_reqs", None) is not None:
-            config.engine.max_num_reqs = args.max_num_reqs
+        if max_num_reqs is not None:
+            config.engine.max_num_reqs = max_num_reqs
         if getattr(args, "max_num_batched_tokens", None) is not None:
             config.engine.max_num_batched_tokens = args.max_num_batched_tokens
+        if getattr(args, "buffer_size", None) is not None:
+            config.engine.buffer_size = args.buffer_size
+        if getattr(args, "block_size", None) is not None:
+            config.engine.block_size = args.block_size
     else:
         if not args.model_path:
             logger.error("Either --config or --model-path must be provided")
             sys.exit(1)
-        
+
         # Create config from command line arguments
         engine = EngineConfig(
             model_path=args.model_path,
@@ -261,40 +279,44 @@ def load_config_from_args(args) -> BenchmarkConfig:
             data_parallel_size=args.data_parallel_size,
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=args.max_model_len,
-            max_num_batched_tokens=getattr(args, 'max_num_batched_tokens', 4096),
-            max_num_reqs=getattr(args, 'max_num_reqs', 128),
+            max_num_batched_tokens=getattr(args, "max_num_batched_tokens", 4096),
+            max_num_reqs=max_num_reqs if max_num_reqs is not None else 128,
             use_lora=args.use_lora,
             lora_path=args.lora_path,
-            kv_cache_layout=getattr(args, 'kv_cache_layout', 'unified'),
+            pre_merge_lora=getattr(args, "pre_merge_lora", True),
+            kv_cache_layout=getattr(args, "kv_cache_layout", "unified"),
             decoding_thresholds={
-                'add_block_threshold': getattr(args, 'add_block_threshold', 0.1),
-                'semi_complete_threshold': getattr(args, 'semi_complete_threshold', 0.9),
-                'decoding_threshold': getattr(args, 'decoding_threshold', 0.9),
+                "add_block_threshold": getattr(args, "add_block_threshold", 0.1),
+                "semi_complete_threshold": getattr(args, "semi_complete_threshold", 0.9),
+                "decoding_threshold": getattr(args, "decoding_threshold", 0.9),
             },
-            diffusion_block_size=args.diffusion_block_size,
-            kv_cache_dtype=getattr(args, 'kv_cache_dtype', None),
-            decode_mode=getattr(args, 'decode_mode', None),
+            block_size=(args.block_size if getattr(args, "block_size", None) is not None else 32),
+            buffer_size=getattr(args, "buffer_size", 4),
+            kv_cache_dtype=getattr(args, "kv_cache_dtype", None),
+            decode_mode=getattr(args, "decode_mode", None),
             # Force enforce_eager=True for varlen mode to avoid CUDA graph capture error
-            enforce_eager=True if getattr(args, 'decode_mode', None) == 'varlen' else (args.enforce_eager if hasattr(args, 'enforce_eager') else False),
-            linear_attn_weight_dtype=getattr(args, 'linear_attn_weight_dtype', None),
-            linear_mlp_weight_dtype=getattr(args, 'linear_mlp_weight_dtype', None),
-            linear_attn_act_dtype=getattr(args, 'linear_attn_act_dtype', None),
-            linear_mlp_act_dtype=getattr(args, 'linear_mlp_act_dtype', None),
+            enforce_eager=True
+            if getattr(args, "decode_mode", None) == "varlen"
+            else (args.enforce_eager if hasattr(args, "enforce_eager") else False),
+            linear_attn_weight_dtype=getattr(args, "linear_attn_weight_dtype", None),
+            linear_mlp_weight_dtype=getattr(args, "linear_mlp_weight_dtype", None),
+            linear_attn_act_dtype=getattr(args, "linear_attn_act_dtype", None),
+            linear_mlp_act_dtype=getattr(args, "linear_mlp_act_dtype", None),
         )
-        
+
         eval_config = EvalConfig(
             dataset_name=args.dataset,
-            dataset_split=getattr(args, 'dataset_split', 'test'),
+            dataset_split=getattr(args, "dataset_split", "test"),
             dataset_limit=args.dataset_limit,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
-            ignore_eos=getattr(args, 'ignore_eos', False),
+            ignore_eos=getattr(args, "ignore_eos", False),
             output_dir=args.output_dir,
             save_results=args.save_results,
         )
-        
+
         config = BenchmarkConfig(engine=engine, eval=eval_config)
-    
+
     return config
 
 
@@ -302,14 +324,14 @@ def main():
     """Main function"""
     parser = create_argument_parser()
     args = parser.parse_args()
-    
+
     # Setup logger
     log_level = getattr(logging, args.log_level.upper())
     setup_logger("diffulex_bench", level=log_level, log_file=args.log_file)
-    
+
     # Load configuration
     config = load_config_from_args(args)
-    
+
     # Run benchmark using lm_eval
     run_benchmark(config)
 

@@ -8,14 +8,14 @@ _NOT_PROVIDED = object()
 
 class DiffulexStrategyRegistry:
     """Registry-driven factory for module implementations."""
-    
+
     _DEFAULT_KEY = "__default__"
-    
+
     def __init_subclass__(cls, **kwargs):
         """Initialize a separate _MODULE_MAPPING for each subclass."""
         super().__init_subclass__(**kwargs)
-        cls._MODULE_MAPPING: dict[str, object] = {} 
-    
+        cls._MODULE_MAPPING: dict[str, object] = {}
+
     @classmethod
     def register(
         cls,
@@ -64,11 +64,17 @@ class DiffulexStrategyRegistry:
                     f"Use exist_ok=True to override."
                 )
         cls._MODULE_MAPPING[key] = factory
-    
+
     @classmethod
     def unregister(cls, strategy_name: str) -> None:
         cls._MODULE_MAPPING.pop(strategy_name, None)
-        
+
     @classmethod
     def available_modules(cls) -> tuple[str, ...]:
         return tuple(sorted(k for k in cls._MODULE_MAPPING if k != cls._DEFAULT_KEY))
+
+    @classmethod
+    def _ensure_strategies_loaded(cls) -> None:
+        """Ensure strategy modules are imported to trigger registration."""
+        if not cls._MODULE_MAPPING:
+            from diffulex import strategy as _  # noqa: F401

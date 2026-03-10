@@ -5,6 +5,7 @@ copyright = f"2025-2025, {author}"
 
 # Version information.
 import re
+
 with open("../pyproject.toml", "r", encoding="utf-8") as f:
     content = f.read()
     match = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
@@ -26,27 +27,27 @@ extensions = [
     "autoapi.extension",
 ]
 
-autoapi_type = 'python'
-autoapi_dirs = ['../diffulex']
+autoapi_type = "python"
+autoapi_dirs = ["../diffulex"]
 
 autoapi_options = [
-    'members',
-    'undoc-members',
-    'show-inheritance',
-    'show-module-summary',
-    'special-members',
+    "members",
+    "undoc-members",
+    "show-inheritance",
+    "show-module-summary",
+    "special-members",
 ]
 autoapi_keep_files = False  # Useful for debugging the generated rst files
 
 autoapi_generate_api_docs = True
 
-autodoc_typehints = 'description'
+autodoc_typehints = "description"
 
 autoapi_ignore = ["*language/ast*", "*version*", "*libinfo*", "*parser*"]
 
 source_suffix = {
-    '.rst': 'restructuredtext',
-    '.md': 'markdown',
+    ".rst": "restructuredtext",
+    ".md": "markdown",
 }
 
 myst_enable_extensions = [
@@ -58,7 +59,14 @@ redirects = {"get_started/try_out": "../index.html#getting-started"}
 
 language = "en"
 
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md", "**/*libinfo*", "**/*version*"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    "README.md",
+    "**/*libinfo*",
+    "**/*version*",
+]
 
 pygments_style = "sphinx"
 todo_include_todos = False

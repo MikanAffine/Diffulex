@@ -33,7 +33,3 @@ class LinearBF16Strategy(LinearQuantizationStrategy):
     def get_scale_shape(self, original_shape: tuple[int, ...], **kwargs) -> tuple[int, ...]:
         _ = original_shape, kwargs
         return tuple()
-
-
-
-

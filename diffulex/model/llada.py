@@ -26,6 +26,7 @@ class LLaDARMSNorm(RMSNorm):
 
 class LLaDAAttention(nn.Module):
     """LLaDA attention."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -94,12 +95,12 @@ class LLaDAAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
-        
+
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v, mask)
         output = self.o_proj(o)
@@ -108,6 +109,7 @@ class LLaDAAttention(nn.Module):
 
 class LLaDAMLP(nn.Module):
     """LLaDA MLP."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -146,6 +148,7 @@ class LLaDAMLP(nn.Module):
 
 class LLaDABlock(nn.Module):
     """LLaDA transformer block."""
+
     def __init__(
         self,
         config,
@@ -158,7 +161,7 @@ class LLaDABlock(nn.Module):
             max_position=config.max_sequence_length,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=True,
-            head_dim=getattr(config, 'head_dim', None),
+            head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 10000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
@@ -190,6 +193,7 @@ class LLaDABlock(nn.Module):
 
 class LLaDAModel(nn.Module):
     """LLaDA backbone."""
+
     def __init__(
         self,
         config: LLaDAConfig,
@@ -198,27 +202,31 @@ class LLaDAModel(nn.Module):
         self.config = config
         self.transformer = nn.Moduledict(
             dict(
-                wte=VocabParallelEmbedding(
-                    config.embedding_size or config.vocab_size, config.d_model
-                ),
+                wte=VocabParallelEmbedding(config.embedding_size or config.vocab_size, config.d_model),
                 emb_drop=nn.Dropout(config.embedding_dropout),
-                ln_f=LLaDARMSNorm(config.hidden_size, config.rms_norm_eps)
+                ln_f=LLaDARMSNorm(config.hidden_size, config.rms_norm_eps),
             )
         )
-        
+
         blocks = [LLaDABlock(config) for _ in range(config.n_layers)]
         self.transformer.update({"blocks": nn.ModuleList(blocks)})
-        
+
         if not (self.config.alibi or self.config.rope):
             self.transformer.update(
-                {"wpe": nn.Embedding(config.max_sequence_length, config.d_model, device=config.init_device)}
-            ) 
-        
+                {
+                    "wpe": nn.Embedding(
+                        config.max_sequence_length,
+                        config.d_model,
+                        device=config.init_device,
+                    )
+                }
+            )
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer.emb_drop(self.transformer.wte(input_ids))
         residual = None
@@ -231,6 +239,7 @@ class LLaDAModel(nn.Module):
 @AutoModelForDiffusionLM.register("llada")
 class LLaDAForDiffusionLM(nn.Module):
     """LLaDA with LM head."""
+
     packed_modules_mapping = {
         "q_proj": ("self_attn.q_proj", None),
         "k_proj": ("self_attn.k_proj", None),
@@ -238,14 +247,12 @@ class LLaDAForDiffusionLM(nn.Module):
         "attn_out": ("self_attn.o_proj", None),
         "attn_norm": ("input_layernorm", None),
         "ff_norm": ("post_attention_layernorm", None),
-        
         "ff_proj": ("mlp.gate_proj", None),
         "up_proj": ("mlp.up_proj", None),
         "ff_out": ("mlp.down_proj", None),
-        
-        "transformer.ff_out": ("lm_head", None)
+        "transformer.ff_out": ("lm_head", None),
     }
-    
+
     def __init__(
         self,
         config: LLaDAConfig,
@@ -253,14 +260,14 @@ class LLaDAForDiffusionLM(nn.Module):
         super().__init__()
         self.model = LLaDAModel(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        if getattr(config, 'weight_tying', False):
+        if getattr(config, "weight_tying", False):
             self.lm_head.weight.data = self.model.transformer.wte.weight.data
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, mask)
         return hidden_states

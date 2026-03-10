@@ -25,7 +25,7 @@ class DiffulexTPWorkerAsyncMixin:
 
         def _step():
             reqs, is_prefill = self.scheduler.schedule()
-            sample_output = self.model_runner.call("run", reqs, is_prefill)
+            sample_output = self.model_runner.call("run", reqs)
             n_diff_steps = self.scheduler.postprocess(reqs, sample_output)
             outputs = [(req.req_id, req.completion_token_ids) for req in reqs if req.is_finished]
             num_tokens = sum(req.num_tokens for req in reqs) if is_prefill else sum(req.new_tokens for req in reqs)
@@ -64,16 +64,24 @@ class DiffulexTPWorkerAsyncMixin:
         while not await self.is_finished_async():
             t = perf_counter()
             n_steps += 1
-            output, num_tokens, is_prefill, cur_n_diff_steps, _ = await self.step_async()
+            (
+                output,
+                num_tokens,
+                is_prefill,
+                cur_n_diff_steps,
+                _,
+            ) = await self.step_async()
             if use_tqdm:
                 if is_prefill:
                     prefill_throughput = num_tokens / (perf_counter() - t)
                 else:
                     decode_throughput = num_tokens / (perf_counter() - t)
-                pbar.set_postfix({
-                    "Prefill": f"{int(prefill_throughput)}tok/s",
-                    "Decode": f"{int(decode_throughput)}tok/s",
-                })
+                pbar.set_postfix(
+                    {
+                        "Prefill": f"{int(prefill_throughput)}tok/s",
+                        "Decode": f"{int(decode_throughput)}tok/s",
+                    }
+                )
             if cur_n_diff_steps:
                 for req_id, n_step in cur_n_diff_steps.items():
                     if req_id in reqid_to_idx and n_step >= 0:
@@ -85,13 +93,20 @@ class DiffulexTPWorkerAsyncMixin:
                     pbar.update(1)
             await asyncio.sleep(0)
 
-        print(f"Finished in {n_steps} steps, prefill throughput: {prefill_throughput:.2f} tok/s, decode throughput: {decode_throughput:.2f} tok/s")
+        print(
+            f"Finished in {n_steps} steps, prefill throughput: {prefill_throughput:.2f} tok/s, decode throughput: {decode_throughput:.2f} tok/s"
+        )
         assert all(toks is not None for toks in outputs), "Some reqs did not produce outputs"
-        outputs = [{
-            "text": self.tokenizer.decode(token_ids).split(self.tokenizer.eos_token)[0],
-            "token_ids": token_ids[:token_ids.index(self.config.eos)] if self.config.eos in token_ids else token_ids,
-            "n_diff_steps": n_diff_step,
-        } for token_ids, n_diff_step in zip(outputs, n_diff_steps)]
+        outputs = [
+            {
+                "text": self.tokenizer.decode(token_ids).split(self.tokenizer.eos_token)[0],
+                "token_ids": token_ids[: token_ids.index(self.config.eos)]
+                if self.config.eos in token_ids
+                else token_ids,
+                "n_diff_steps": n_diff_step,
+            }
+            for token_ids, n_diff_step in zip(outputs, n_diff_steps)
+        ]
         if use_tqdm:
             pbar.close()
         return outputs

@@ -3,13 +3,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from diffulex.engine.request import DllmReq, DllmReqStatus
+
 if TYPE_CHECKING:
     from diffulex.engine.scheduler import SchedulerBase
 
+
 class SchedulerMultiBlockMixin:
     def init_multi_block(self: SchedulerBase) -> None:
-        self.block_size = self.config.diffusion_block_size
-    
+        self.block_size = self.config.block_size
+
     def add_multi_block(self: SchedulerBase, req: DllmReq) -> None:
         req.init_multi_block(self.config)
         self.waiting_reqs.append(req)
@@ -18,18 +20,18 @@ class SchedulerMultiBlockMixin:
         scheduled: list[DllmReq] = []
         num_reqs = 0
         num_batched_tokens = 0
+
         while self.waiting_reqs and num_reqs < self.max_num_reqs:
             req = self.waiting_reqs[0]
-            projected = len(req) + req.diffusion_block_size
-            if (
-                num_batched_tokens + projected > self.max_num_batched_tokens
-                or not self.kv_cache_manager.can_allocate(req)
+            projected = len(req) + self.block_size
+            if num_batched_tokens + projected > self.max_num_batched_tokens or not self.kv_cache_manager.can_allocate(
+                req
             ):
                 break
             num_reqs += 1
             self.kv_cache_manager.allocate(req)
             num_batched_tokens += projected - req.num_cached_tokens
-            req.status = DllmReqStatus.PENDING
+            req.make_pending()
             self.waiting_reqs.popleft()
             self.running_reqs.append(req)
             scheduled.append(req)
@@ -48,15 +50,16 @@ class SchedulerMultiBlockMixin:
                 num_reqs += 1
                 self.kv_cache_manager.may_append(req)
                 scheduled.append(req)
+
         if not scheduled:
-            diag = {
-                "phase": "decode",
-                "waiting": len(self.waiting_reqs),
-                "running": len(self.running_reqs),
-                "max_num_reqs": self.max_num_reqs,
-                "max_num_batched_tokens": self.max_num_batched_tokens,
-                "block_size": self.block_size,
-            }
+            diag = dict(
+                phase="decode",
+                waiting=len(self.waiting_reqs),
+                running=len(self.running_reqs),
+                max_num_reqs=self.max_num_reqs,
+                max_num_batched_tokens=self.max_num_batched_tokens,
+                block_size=self.block_size,
+            )
             candidates = list(self.running_reqs)[:3] + list(self.waiting_reqs)[:2]
             details = []
             for idx, candidate in enumerate(candidates):
@@ -66,7 +69,7 @@ class SchedulerMultiBlockMixin:
                     can_append = "error"
                 details.append(
                     f"[{idx}] status={candidate.status.name}, len={len(candidate)}, "
-                    f"diff_block={getattr(candidate, 'diffusion_block_size', '?')}, "
+                    f"block_size={self.block_size}, "
                     f"new_tokens={getattr(candidate, 'new_tokens', '?')}, "
                     f"cached={getattr(candidate, 'num_cached_tokens', '?')}, "
                     f"can_append={can_append}"
@@ -79,7 +82,9 @@ class SchedulerMultiBlockMixin:
         return scheduled, False
 
     def preempt_multi_block(self, req: DllmReq) -> None:
-        req.status = DllmReqStatus.WAITING
+        if req.req_id == 23:
+            pass
+        req.preempt()
         self.kv_cache_manager.free(req)
         self.waiting_reqs.appendleft(req)
 
@@ -91,6 +96,7 @@ class SchedulerMultiBlockMixin:
         num_nfes: dict[int, int] = {}
         for req in reqs:
             req.reset_new_tokens()
+
             req_id_str = str(req.req_id)
             true_ids_map = sample_output.true_local_ids_map.get(req_id_str, {})
             accepted_ids_map = sample_output.accepted_ids_map.get(req_id_str, {})
@@ -104,6 +110,7 @@ class SchedulerMultiBlockMixin:
                 for true_local_id, accepted_id in zip(true_local_ids, accepted_ids):
                     token = sampled_tokens[accepted_id]
                     dllm_block.write_token(token, true_local_id)
+
             req.postprocess()
             if req.is_completed:
                 req.status = DllmReqStatus.FINISHED

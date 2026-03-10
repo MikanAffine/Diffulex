@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 import torch
 
 from dataclasses import dataclass, field
@@ -10,17 +11,17 @@ from diffulex.config import DecodingThresholds
 from diffulex.engine.status import DllmBlockStatus, DllmBlockType
 
 
+weakref_fn = lambda x: weakref.ref(x) if x is not None else None
+
+
 @dataclass
 class DllmBlock:
     block_id: int
-    req: "DllmReq"
     start: int
     end: int
     block_size: int
     mask_token_id: int
     thresholds: DecodingThresholds
-
-    dllm_block_buffer: "DllmBlockBuffer" = None
 
     status: DllmBlockStatus = None
     prev_block: "DllmBlock" = None
@@ -31,10 +32,27 @@ class DllmBlock:
         prev_block_id = self.prev_block.block_id if self.prev_block is not None else None
         return f"DllmBlock(block_id={self.block_id}, start={self.start}, end={self.end}, block_size={self.block_size}, mask_token_id={self.mask_token_id}, thresholds={self.thresholds}, status={self.status}, prev_block_id={prev_block_id}, is_last_in_context={self.is_last_in_context})"
 
-    def __post_init__(self):
+    def post_init_dllm_block(self, req: "DllmReq", dllm_block_buffer: "DllmBlockBuffer"):
         assert self.end - self.start == self.block_size
+
+        if req is not None:
+            self._req = weakref_fn(req)
+
+        if dllm_block_buffer is not None:
+            self._dllm_block_buffer = weakref_fn(dllm_block_buffer)
+
         if self.status is None:
             self.status = DllmBlockStatus.TO_CACHE if self.is_complete else DllmBlockStatus.ACTIVE
+
+        self.make_in_context()
+
+    @property
+    def req(self) -> "DllmReq":
+        return self._req() if self._req else None
+
+    @property
+    def dllm_block_buffer(self) -> "DllmBlockBuffer":
+        return self._dllm_block_buffer() if self._dllm_block_buffer else None
 
     @property
     def token_ids(self) -> list[int]:
@@ -42,20 +60,12 @@ class DllmBlock:
 
     @property
     def mask_token_relative_ids(self) -> list[int]:
-        return [
-            i
-            for i, token_id in enumerate(self.token_ids)
-            if token_id == self.mask_token_id
-        ]
-    
+        return [i for i, token_id in enumerate(self.token_ids) if token_id == self.mask_token_id]
+
     @property
     def mask_token_global_ids(self) -> list[int]:
-        return [
-            i + self.start
-            for i, token_id in enumerate(self.token_ids)
-            if token_id == self.mask_token_id
-        ]
-    
+        return [i + self.start for i, token_id in enumerate(self.token_ids) if token_id == self.mask_token_id]
+
     @property
     def in_buffer_block_id(self) -> int:
         return self.dllm_block_buffer.block_ids.index(self.block_id)
@@ -142,18 +152,25 @@ class DllmBlock:
 
 @dataclass
 class DllmBlockBuffer:
-    req: "DllmReq"
     buffer_size: int
     dllm_blocks: list[DllmBlock] = field(default_factory=list)
 
     def __repr__(self):
         return f"DllmBlockBuffer(buffer_size={self.buffer_size}, dllm_blocks={self.dllm_blocks})"
 
-    def __post_init__(self):
+    def post_init_dllm_block_buffer(self, req: "DllmReq"):
         assert len(self.dllm_blocks) == self.buffer_size
 
-        for i in range(len(self.dllm_blocks)):
-            self.dllm_blocks[i].dllm_block_buffer = self
+        if req is not None:
+            self._req = weakref_fn(req)
+
+        if len(self.dllm_blocks) > 0:
+            for block in self.dllm_blocks:
+                block.post_init_dllm_block(None, self)
+
+    @property
+    def req(self) -> "DllmReq":
+        return self._req() if self._req else None
 
     @property
     def buffer_sequence(self) -> list[int]:

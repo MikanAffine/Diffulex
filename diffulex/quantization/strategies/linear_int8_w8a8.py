@@ -94,9 +94,7 @@ class LinearInt8W8A8Strategy(LinearQuantizationStrategy):
         scales = scale_or_metadata.get("scales") if isinstance(scale_or_metadata, dict) else scale_or_metadata
         if scales is None:
             raise ValueError("scales required for dequantization")
-        raise RuntimeError(
-            "W8A8 不提供 dequantize 路径（避免走慢的 bf16 GEMM）。"
-        )
+        raise RuntimeError("W8A8 不提供 dequantize 路径（避免走慢的 bf16 GEMM）。")
 
     def linear_forward(
         self,
@@ -150,4 +148,3 @@ class LinearInt8W8A8Strategy(LinearQuantizationStrategy):
         if x.dim() == 1:
             return y.squeeze(0)
         return y.reshape(*orig_shape[:-1], y.shape[-1])
-

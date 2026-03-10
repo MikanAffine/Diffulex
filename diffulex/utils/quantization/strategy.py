@@ -1,4 +1,5 @@
 """Re-export from diffulex.quantization.strategy."""
+
 from diffulex.quantization.strategy import (
     QuantizationStrategy,
     KVCacheQuantizationStrategy,
@@ -8,7 +9,7 @@ from diffulex.quantization.strategy import (
 
 __all__ = [
     "QuantizationStrategy",
-    "kv_cacheQuantizationStrategy",
+    "KVCacheQuantizationStrategy",
     "WeightQuantizationStrategy",
     "LinearQuantizationStrategy",
 ]

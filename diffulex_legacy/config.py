@@ -8,22 +8,22 @@ class Config:
     model: str
     lora_path: str = ""
     model_name: str = "dream"
-    model_type: str = "diffusion_lm" # "causal_lm" or "diffusion_lm"
-    decoding_strategy: str = "d2f" # "d2f", "fast-dllm-v2", "block-diffusion"
-    
+    model_type: str = "diffusion_lm"  # "causal_lm" or "diffusion_lm"
+    decoding_strategy: str = "d2f"  # "d2f", "fast-dllm-v2", "block-diffusion"
+
     mask_token_id: int = 151666
     diffusion_block_size: int = 32
-    
+
     accept_threshold: float = 0.9
     complete_threshold: float = 0.95
     add_new_block_threshold: float = 0.1
-    
+
     use_lora: bool = False
     max_num_batched_tokens: int = 4096
     max_num_seqs: int = 128
     max_model_len: int = 2048
     gpu_memory_utilization: float = 0.9
-    
+
     data_parallel_size: int = 1
     tensor_parallel_size: int = 2
     # Distributed comm (per tensor-parallel group). When using multiple DP
@@ -34,7 +34,7 @@ class Config:
     shm_name: str = "d2f_vllm"
     # Start device index for this TP group (set by DP launcher).
     device_start: int = 0
-    
+
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
@@ -60,6 +60,10 @@ class Config:
                 print(f"Warning: LoRA path {self.lora_path} does not exist")
 
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
-        cfg_max_model_len = self.hf_config.max_position_embeddings if hasattr(self.hf_config, "max_position_embeddings") else self.hf_config.max_sequence_length
+        cfg_max_model_len = (
+            self.hf_config.max_position_embeddings
+            if hasattr(self.hf_config, "max_position_embeddings")
+            else self.hf_config.max_sequence_length
+        )
         self.max_model_len = min(self.max_model_len, cfg_max_model_len)
         assert self.max_num_batched_tokens >= self.max_model_len

@@ -1,12 +1,12 @@
-import os
 import csv
 import pandas as pd
+
 
 def summarize_profiling(csv_path: str) -> dict:
     totals = {}
     total_nums = {}
     avgs = {}
-    with open(csv_path, 'r', newline='') as f:
+    with open(csv_path, "r", newline="") as f:
         reader = csv.dictReader(f)
         for row in reader:
             for k, v in row.items():
@@ -24,6 +24,7 @@ def summarize_profiling(csv_path: str) -> dict:
         else:
             avgs[k] = 0.0
     print(pd.DataFrame([avgs]).T)
-    
+
+
 if __name__ == "__main__":
     summarize_profiling("log/attention_profile.csv")

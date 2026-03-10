@@ -67,5 +67,3 @@ class QuantizationConfig:
                 linear_mlp_dtype=linear_mlp_act_dtype,
             ),
         )
-
-

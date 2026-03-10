@@ -10,7 +10,9 @@ from diffulex.layer.rotary_embedding import get_rope
 from diffulex.model.auto_model import AutoModelForDiffusionLM
 from diffulex.layer.linear import RowParallelLinear, ColumnParallelLinear
 from diffulex.layer.embed_head import VocabParallelEmbedding, ParallelLMHead
-from diffulex.model.config.fast_dllm_v2.configuration_fast_dllm_v2 import FastdLLMV2Config
+from diffulex.model.config.fast_dllm_v2.configuration_fast_dllm_v2 import (
+    FastdLLMV2Config,
+)
 
 
 if os.environ.get("TRITON_INTERPRET", None) == "1":
@@ -26,6 +28,7 @@ class FastdLLMV2RMSNorm(RMSNorm):
 
 class FastdLLMV2Attention(nn.Module):
     """FastdLLM V2 attention mechanism."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -93,12 +96,12 @@ class FastdLLMV2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
-        
+
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v, mask)
         output = self.o_proj(o)
@@ -107,6 +110,7 @@ class FastdLLMV2Attention(nn.Module):
 
 class FastdLLMV2MLP(nn.Module):
     """FastdLLM V2 MLP with SiLU activation."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -145,6 +149,7 @@ class FastdLLMV2MLP(nn.Module):
 
 class FastdLLMV2DecoderLayer(nn.Module):
     """FastdLLM V2 transformer decoder layer."""
+
     def __init__(
         self,
         config: FastdLLMV2Config,
@@ -157,7 +162,7 @@ class FastdLLMV2DecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=True,  # Dream uses bias in attention
-            head_dim=getattr(config, 'head_dim', None),
+            head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 10000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
@@ -189,21 +194,21 @@ class FastdLLMV2DecoderLayer(nn.Module):
 
 class FastdLLMV2Model(nn.Module):
     """FastdLLM V2 model for diffusion language modeling."""
+
     def __init__(
         self,
         config: FastdLLMV2Config,
     ) -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([FastdLLMV2DecoderLayer(config) 
-                                     for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([FastdLLMV2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = FastdLLMV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -216,8 +221,9 @@ class FastdLLMV2Model(nn.Module):
 @AutoModelForDiffusionLM.register("fast_dllm_v2")
 class FastdLLMV2ForDiffusionLM(nn.Module):
     """FastdLLM V2 model for diffusion language modeling with LM head."""
+
     packed_modules_mapping = {}
-    
+
     def __init__(
         self,
         config: FastdLLMV2Config,
@@ -225,14 +231,14 @@ class FastdLLMV2ForDiffusionLM(nn.Module):
         super().__init__()
         self.model = FastdLLMV2Model(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        if getattr(config, 'tie_word_embeddings', False):
+        if getattr(config, "tie_word_embeddings", False):
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mask: torch.Tensor | None = None
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, mask)
         return hidden_states

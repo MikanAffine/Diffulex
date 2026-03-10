@@ -12,6 +12,7 @@ from diffulex.logger import get_logger
 
 logger = get_logger(__name__)
 
+
 def _read_quantize_config(model_dir: str) -> dict:
     """Read vLLM-style quantization metadata if present.
 
@@ -49,9 +50,7 @@ def _make_packed_qzeros_constant(
         raise ValueError(f"Unsupported bits={bits} for packed qzeros (expected 2/4/8)")
     pack_factor = 32 // bits
     if out_features % pack_factor != 0:
-        raise ValueError(
-            f"out_features={out_features} not divisible by pack_factor={pack_factor} for bits={bits}"
-        )
+        raise ValueError(f"out_features={out_features} not divisible by pack_factor={pack_factor} for bits={bits}")
     out_packed = out_features // pack_factor
 
     # Stored constant for GPTQ v1: bias - 1, where bias = 2^(bits-1).
@@ -178,23 +177,23 @@ def load_lora_config(lora_path: str) -> dict:
     """Load LoRA configuration from adapter_config.json."""
     config_path = os.path.join(lora_path, "adapter_config.json")
     if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             return json.load(f)
     return {}
 
 
 def enable_lora_for_model(model: nn.Module, lora_config: dict):
     """Enable LoRA for existing linear layers in the model."""
-    r = lora_config.get('r', 16)
-    lora_alpha = lora_config.get('lora_alpha', 32.0)
-    lora_dropout = lora_config.get('lora_dropout', 0.0)
-    target_modules = lora_config.get('target_modules', [])
-    
+    r = lora_config.get("r", 16)
+    lora_alpha = lora_config.get("lora_alpha", 32.0)
+    lora_dropout = lora_config.get("lora_dropout", 0.0)
+    target_modules = lora_config.get("target_modules", [])
+
     for name, module in model.named_modules():
-        if hasattr(module, '__init_lora__'):
+        if hasattr(module, "__init_lora__"):
             should_apply = True
             if target_modules:
-                leaf = name.split('.')[-1] if name else name
+                leaf = name.split(".")[-1] if name else name
                 should_apply = any(target == leaf for target in target_modules)
             if should_apply:
                 module.__init_lora__(r, lora_alpha, lora_dropout)
@@ -207,18 +206,18 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
 
 def _load_gptq_awq_weights(model: nn.Module, config: Config):
     """Load GPTQ/AWQ offline quantized weights from checkpoint.
-    
+
     Args:
         model: Model module
         config: Config with model path
-        
+
     Returns:
         Tuple of (loaded_gptq_count, loaded_awq_count, skipped_count)
     """
     loaded_gptq = 0
     loaded_awq = 0
     skipped = 0
-    
+
     # Check if model is configured for GPTQ or AWQ
     weight_attn_dtype = getattr(config, "linear_attn_weight_dtype", "bf16") or "bf16"
     weight_mlp_dtype = getattr(config, "linear_mlp_weight_dtype", "bf16") or "bf16"
@@ -226,7 +225,7 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
     checkpoint_format = (quantize_cfg.get("checkpoint_format") or "").strip().lower()
     ckpt_bits = int(quantize_cfg.get("bits", 0) or 0)
     ckpt_group_size = int(quantize_cfg.get("group_size", 0) or 0)
-    
+
     # NOTE: marlin variants reuse the same offline GPTQ/AWQ checkpoint keys
     # (qweight/qzeros/scales[/g_idx]) and are repacked lazily in `LinearBase`
     # on first forward.
@@ -234,14 +233,18 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
     awq_dtypes = {"awq", "awq_marlin"}
     use_gptq = (weight_attn_dtype or "").lower() in gptq_dtypes or (weight_mlp_dtype or "").lower() in gptq_dtypes
     use_awq = (weight_attn_dtype or "").lower() in awq_dtypes or (weight_mlp_dtype or "").lower() in awq_dtypes
-    want_gptq_marlin = (weight_attn_dtype or "").lower() == "gptq_marlin" or (weight_mlp_dtype or "").lower() == "gptq_marlin"
-    want_awq_marlin = (weight_attn_dtype or "").lower() == "awq_marlin" or (weight_mlp_dtype or "").lower() == "awq_marlin"
+    want_gptq_marlin = (weight_attn_dtype or "").lower() == "gptq_marlin" or (
+        weight_mlp_dtype or ""
+    ).lower() == "gptq_marlin"
+    want_awq_marlin = (weight_attn_dtype or "").lower() == "awq_marlin" or (
+        weight_mlp_dtype or ""
+    ).lower() == "awq_marlin"
     is_gptq_marlin_ckpt = checkpoint_format == "gptq_marlin"
     is_awq_marlin_ckpt = checkpoint_format == "awq_marlin"
-    
+
     if not (use_gptq or use_awq):
         return loaded_gptq, loaded_awq, skipped
-    
+
     all_files = list(glob(os.path.join(config.model, "*.safetensors")))
 
     # Scan keys once and remember which file contains each key.
@@ -274,7 +277,7 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
     offline_capable_modules: dict[str, nn.Module] = {
         name: m for name, m in named_modules.items() if hasattr(m, "set_offline_quantized_weight")
     }
-    
+
     def _find_offline_capable_module(module_name: str) -> nn.Module | None:
         """Best-effort resolve module_name to a module with offline quant support."""
         m = offline_capable_modules.get(module_name)
@@ -293,7 +296,14 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
                 return cand
         return None
 
-    def _load_tensors_for_prefix(key_dict: dict[str, str], *, want_g_idx: bool) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    def _load_tensors_for_prefix(
+        key_dict: dict[str, str], *, want_g_idx: bool
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         """Load qweight/qzeros/scales/(g_idx) from the minimal set of safetensors files."""
         qweight = qzeros = scales = g_idx = None
         keys = [key_dict.get("qweight"), key_dict.get("qzeros"), key_dict.get("scales")]
@@ -316,24 +326,24 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
 
     # Load GPTQ/AWQ weights for each module
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
-    
+
     for prefix, key_dict in module_keys.items():
         if "qweight" not in key_dict or "qzeros" not in key_dict or "scales" not in key_dict:
             continue  # Skip incomplete sets
-        
+
         # Map prefix to module name
         module_name = prefix
         for k, (v, _) in packed_modules_mapping.items():
             if k in prefix:
                 module_name = prefix.replace(k, v)
                 break
-        
+
         try:
             module = _find_offline_capable_module(module_name)
             if module is None:
                 skipped += 1
                 continue
-            
+
             # Determine format: check if g_idx exists (GPTQ) or not (AWQ)
             has_g_idx = "g_idx" in key_dict
             is_gptq_keyset = has_g_idx or is_gptq_marlin_ckpt
@@ -344,20 +354,18 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
             else:
                 # Prefer GPTQ if both are enabled and g_idx exists
                 format = "gptq" if (use_gptq and is_gptq_keyset) else ("awq" if use_awq else None)
-            
+
             if format is None:
                 skipped += 1
                 continue
-            
+
             # Load tensors from the minimal set of safetensors files.
-            qweight, qzeros, scales, g_idx = _load_tensors_for_prefix(
-                key_dict, want_g_idx=(format == "gptq")
-            )
-            
+            qweight, qzeros, scales, g_idx = _load_tensors_for_prefix(key_dict, want_g_idx=(format == "gptq"))
+
             if qweight is None or qzeros is None or scales is None:
                 skipped += 1
                 continue
-            
+
             # Infer dimensions from tensor shapes (vLLM standard format) WITHOUT
             # assuming bits=4. This enables GPTQ W2/W4/W8 checkpoints.
             if format == "gptq":
@@ -431,7 +439,9 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
                     num_groups = int(qzeros.shape[0]) if getattr(qzeros, "numel", lambda: 1)() > 0 else 0
                     if num_groups > 0 and in_features % num_groups == 0:
                         group_size = in_features // num_groups
-                    elif len(scales.shape) == 2 and int(scales.shape[0]) > 0 and in_features % int(scales.shape[0]) == 0:
+                    elif (
+                        len(scales.shape) == 2 and int(scales.shape[0]) > 0 and in_features % int(scales.shape[0]) == 0
+                    ):
                         group_size = in_features // int(scales.shape[0])
 
             # For gptq_marlin checkpoints qzeros may be empty; create a shape-compatible dummy
@@ -461,7 +471,7 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
                     logger.warning(f"Failed to create dummy qzeros for {module_name}: {e}. Skipping.")
                     skipped += 1
                     continue
-            
+
             # Handle tensor parallel sharding (TP>1).
             # ColumnParallelLinear: tp_dim=0 (shard N/out_features)
             # RowParallelLinear   : tp_dim=1 (shard K/in_features)
@@ -509,7 +519,7 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
                                 )
                                 skipped += 1
                                 continue
-                            qweight = qweight[:, (out_start * n_factor):(out_end * n_factor)]
+                            qweight = qweight[:, (out_start * n_factor) : (out_end * n_factor)]
                             # scales keep original N
                             scales = scales[:, out_start:out_end]
                             # qzeros stays dummy/empty; g_idx stays on K.
@@ -578,11 +588,11 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
                                 scales = scales[g_start:g_end, :]
                             elif int(scales.shape[0]) == 2 * expected_num_groups:
                                 # Legacy/alternate layout: [2*num_groups, N/2]
-                                scales = scales[(2 * g_start):(2 * g_end), :]
+                                scales = scales[(2 * g_start) : (2 * g_end), :]
                             else:
                                 logger.warning(
                                     f"unexpected gptq_marlin scales.shape[0]={int(scales.shape[0])} "
-                                    f"(expected {expected_num_groups} or {2*expected_num_groups}) for {module_name}. Skipping."
+                                    f"(expected {expected_num_groups} or {2 * expected_num_groups}) for {module_name}. Skipping."
                                 )
                                 skipped += 1
                                 continue
@@ -612,7 +622,7 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
                         qzeros = qzeros[g_start:g_end, :]
                         scales = scales[g_start:g_end, :]
                         in_features = in_per
-            
+
             # Treat empty g_idx as "not provided" for GPTQ (desc_act=False checkpoints often store empty).
             if g_idx is not None and getattr(g_idx, "numel", lambda: 1)() == 0:
                 g_idx = None
@@ -650,11 +660,11 @@ def _load_gptq_awq_weights(model: nn.Module, config: Config):
             except Exception as e:
                 logger.exception(f"Failed to load offline quantized weights for {module_name}: {e}")
                 skipped += 1
-        
+
         except Exception as e:
             logger.exception(f"Error loading offline quantized weights for {prefix}: {e}")
             skipped += 1
-    
+
     return loaded_gptq, loaded_awq, skipped
 
 
@@ -668,29 +678,25 @@ def load_model(model: nn.Module, config: Config):
             model = enable_lora_for_model(model, lora_config)
         else:
             logger.info("No adapter_config.json found, using default LoRA parameters")
-            default_config = {'r': 16, 'lora_alpha': 32.0, 'lora_dropout': 0.0}
+            default_config = {"r": 16, "lora_alpha": 32.0, "lora_dropout": 0.0}
             model = enable_lora_for_model(model, default_config)
-    
+
     # First, try to load offline quantized weights (GPTQ/AWQ)
     loaded_gptq, loaded_awq, skipped_offline = _load_gptq_awq_weights(model, config)
     if loaded_gptq > 0 or loaded_awq > 0:
         print(f"Loaded offline quantized weights: GPTQ={loaded_gptq}, AWQ={loaded_awq}, skipped={skipped_offline}")
-    
+
     # Load base model weights (only for non-offline-quantized layers)
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     for file in tqdm(glob(os.path.join(config.model, "*.safetensors")), desc="Loading base model"):
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
                 # Skip GPTQ/AWQ keys (already loaded)
-                if any(
-                    weight_name.endswith(suffix)
-                    for suffix in [".qweight", ".qzeros", ".scales", ".g_idx"]
-                ):
+                if any(weight_name.endswith(suffix) for suffix in [".qweight", ".qzeros", ".scales", ".g_idx"]):
                     continue
-                
+
                 for k in packed_modules_mapping:
                     if k in weight_name:
-                        
                         if config.model_name == "llada" and k == "ff_out" and "transformer.ff_out" in weight_name:
                             continue
                         elif config.model_name == "llada" and k == "transformer.ff_out":
@@ -700,7 +706,7 @@ def load_model(model: nn.Module, config: Config):
                         else:
                             v, shard_id = packed_modules_mapping[k]
                             param_name = weight_name.replace(k, v)
-                            
+
                         if "layernorm" in param_name:
                             try:
                                 param = model.get_parameter(param_name)
@@ -716,7 +722,11 @@ def load_model(model: nn.Module, config: Config):
                         else:
                             try:
                                 param = model.get_parameter(param_name)
-                                weight_loader = partial(getattr(param, "weight_loader"), param, f.get_tensor(weight_name)) 
+                                weight_loader = partial(
+                                    getattr(param, "weight_loader"),
+                                    param,
+                                    f.get_tensor(weight_name),
+                                )
                                 if shard_id is None:
                                     weight_loader()
                                 else:
@@ -738,66 +748,87 @@ def load_model(model: nn.Module, config: Config):
                             buffer.copy_(f.get_tensor(weight_name))
                         except (AttributeError, KeyError):
                             pass
-    
+
     # Load LoRA weights if enabled
     if config.use_lora and config.lora_path:
         if os.path.exists(config.lora_path):
             logger.info(f"Loading LoRA weights from {config.lora_path}")
-            load_lora_weights_fn = partial(load_lora_weights, model, config.lora_path)
-            packed_modules_mapping = packed_modules_mapping if config.model_name == "llada" else None
-            model = load_lora_weights_fn(packed_modules_mapping=packed_modules_mapping)
+            model = load_lora_weights(
+                model,
+                config.lora_path,
+                packed_modules_mapping=packed_modules_mapping if config.model_name == "llada" else None,
+                pre_merge_lora=getattr(config, "pre_merge_lora", False),
+            )
         else:
             logger.warning(f"LoRA path {config.lora_path} does not exist, skipping LoRA loading")
-    
+
     return model
 
 
-def load_lora_weights(model: nn.Module, lora_path: str, packed_modules_mapping: dict | None = None):
-    """Load LoRA weights into LoRA-enabled layers."""
+def load_lora_weights(
+    model: nn.Module,
+    lora_path: str,
+    packed_modules_mapping: dict | None = None,
+    pre_merge_lora: bool = False,
+):
+    """Load LoRA weights into LoRA-enabled layers.
+
+    Args:
+        model: The model with LoRA-enabled linear layers.
+        lora_path: Path to LoRA checkpoint.
+        packed_modules_mapping: Optional mapping for packed modules (e.g. llada lm_head).
+        pre_merge_lora: If True, merge LoRA into base weights after loading so that
+            forward does not need to run LoRA computation each time. If False, keep
+            LoRA separate and apply it in lora_forward during each forward pass.
+    """
     try:
         lora_config = load_lora_config(lora_path)
-        target_modules = lora_config.get('target_modules', [])
-        
+        target_modules = lora_config.get("target_modules", [])
+
         lora_weights = {}
-        
+
         for file in tqdm(glob(os.path.join(lora_path, "*.safetensors")), desc="Loading LoRA"):
             with safe_open(file, "pt", "cpu") as f:
                 for weight_name in f.keys():
                     lora_weights[weight_name] = f.get_tensor(weight_name)
-        
+
         applied_count = 0
 
         modified_modules = None
         if packed_modules_mapping is not None:
             modified_modules = [v for k, (v, _) in packed_modules_mapping.items() if k in target_modules]
             rev_mapping = {v: k for k, (v, _) in packed_modules_mapping.items()}
-            
+
         for name, module in model.named_modules():
-            if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+            if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
                 should_apply = True
-                
+
                 if modified_modules is not None:
-                    modified_module_type = '.'.join(name.split('.')[-2:])  
+                    modified_module_type = ".".join(name.split(".")[-2:])
                     org_module_type = rev_mapping[modified_module_type]
                     org_name = name.replace(modified_module_type, org_module_type)
                     should_apply = any(target in modified_module_type for target in modified_modules)
                 elif target_modules:
-                    module_type = name.split('.')[-1] if '.' in name else name
+                    module_type = name.split(".")[-1] if "." in name else name
                     should_apply = any(target in module_type for target in target_modules)
-                 
+
                 if not should_apply:
                     continue
-                
-                base_patterns = [
-                    name,
-                    f"base_model.model.{name}",
-                    f"model.{name}",
-                ] if modified_modules is None else [
-                    org_name,
-                    f"base_model.model.{org_name}",
-                    f"model.{org_name}",
-                ]
-                
+
+                base_patterns = (
+                    [
+                        name,
+                        f"base_model.model.{name}",
+                        f"model.{name}",
+                    ]
+                    if modified_modules is None
+                    else [
+                        org_name,
+                        f"base_model.model.{org_name}",
+                        f"model.{org_name}",
+                    ]
+                )
+
                 found_a = found_b = None
                 for base_name in base_patterns:
                     lora_a_keys = [
@@ -806,11 +837,11 @@ def load_lora_weights(model: nn.Module, lora_path: str, packed_modules_mapping: 
                         f"{base_name}.lora_A",
                     ]
                     lora_b_keys = [
-                        f"{base_name}.lora_B.weight", 
+                        f"{base_name}.lora_B.weight",
                         f"{base_name}.lora_B.default.weight",
                         f"{base_name}.lora_B",
                     ]
-                    
+
                     for key in lora_a_keys:
                         if key in lora_weights:
                             found_a = lora_weights[key]
@@ -819,36 +850,38 @@ def load_lora_weights(model: nn.Module, lora_path: str, packed_modules_mapping: 
                         if key in lora_weights:
                             found_b = lora_weights[key]
                             break
-                    
+
                     if found_a is not None and found_b is not None:
                         break
-                
+
                 if found_a is not None and found_b is not None:
-                    if hasattr(module, 'tp_size') and module.tp_size > 1:
-                        if hasattr(module, 'tp_dim') and module.tp_dim == 0:
+                    if hasattr(module, "tp_size") and module.tp_size > 1:
+                        if hasattr(module, "tp_dim") and module.tp_dim == 0:
                             shard_size = found_b.size(0) // module.tp_size
                             start_idx = module.tp_rank * shard_size
-                            found_b = found_b[start_idx:start_idx + shard_size]
-                        elif hasattr(module, 'tp_dim') and module.tp_dim == 1:
+                            found_b = found_b[start_idx : start_idx + shard_size]
+                        elif hasattr(module, "tp_dim") and module.tp_dim == 1:
                             shard_size = found_a.size(1) // module.tp_size
                             start_idx = module.tp_rank * shard_size
-                            found_a = found_a[:, start_idx:start_idx + shard_size]
-                    
+                            found_a = found_a[:, start_idx : start_idx + shard_size]
+
                     try:
                         module.lora_A.data.copy_(found_a)
                         module.lora_B.data.copy_(found_b)
                         applied_count += 1
                     except Exception as e:
                         logger.warning(f"Failed to load LoRA weights for {name}: {e}")
-        
-        for module in model.modules():
-            if hasattr(module, 'merge_lora'):
-                module.merge_lora()
-        
-        logger.info(f"LoRA weights applied to {applied_count} layers and merged")
-        
+
+        if pre_merge_lora:
+            for module in model.modules():
+                if hasattr(module, "merge_lora"):
+                    module.merge_lora()
+            logger.info(f"LoRA weights applied to {applied_count} layers and merged into base")
+        else:
+            logger.info(f"LoRA weights applied to {applied_count} layers (unmerged, applied per forward)")
+
     except Exception as e:
         logger.error(f"Error loading LoRA weights: {e}")
         logger.warning("Continuing with base model only")
-    
+
     return model

@@ -9,7 +9,6 @@ Diffulex is a Paged Attention-based dLLM accelerated decoding inference framewor
 :caption: GET STARTED
 :::
 
-
 :::{toctree}
 :maxdepth: 1
 :caption: TUTORIALS

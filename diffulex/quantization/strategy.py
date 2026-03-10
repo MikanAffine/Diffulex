@@ -66,19 +66,28 @@ class KVCacheQuantizationStrategy(QuantizationStrategy):
         return "bf16"
 
     @abstractmethod
-    def compute_scales(self, k: torch.Tensor, v: torch.Tensor,
-                      num_kv_heads: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def compute_scales(
+        self, k: torch.Tensor, v: torch.Tensor, num_kv_heads: int, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute quantization scales for K and V."""
         pass
 
     @abstractmethod
-    def update_scales(self, k: torch.Tensor, v: torch.Tensor,
-                     k_scale: Optional[torch.Tensor], v_scale: Optional[torch.Tensor],
-                     num_kv_heads: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def update_scales(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        k_scale: Optional[torch.Tensor],
+        v_scale: Optional[torch.Tensor],
+        num_kv_heads: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Update quantization scales (e.g., using running max strategy)."""
         pass
 
-    def init_scales(self, num_kv_heads: int, device: torch.device) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def init_scales(
+        self, num_kv_heads: int, device: torch.device
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Initialize quantization scales for K and V."""
         return None, None
 

@@ -78,17 +78,17 @@ engine:
   model_name: "dream"
   decoding_strategy: "d2f"
   mask_token_id: 151666
-  
+
   # LoRA configuration
   use_lora: false
   lora_path: ""
-  
+
   # Parallelism and memory
   tensor_parallel_size: 1
   data_parallel_size: 1
   gpu_memory_utilization: 0.9
   max_model_len: 2048
-  
+
   # D2F-specific parameters
   accept_threshold: 0.9
   complete_threshold: 0.95
@@ -99,11 +99,11 @@ eval:
   # Task/Dataset
   dataset_name: "gsm8k"
   dataset_limit: 100
-  
+
   # Sampling
   temperature: 0.0
   max_tokens: 256
-  
+
   # Output
   output_dir: "benchmark_results"
 ```

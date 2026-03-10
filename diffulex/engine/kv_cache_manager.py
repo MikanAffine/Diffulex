@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from diffulex.config import Config
 from diffulex.engine.request import DllmReq
 from diffulex.engine.strategy_registry import DiffulexStrategyRegistry
-from diffulex.mixin.multi_block.engine.kv_cache_manager import MultiBlockKVCacheManagerMixin
+from diffulex.mixin.multi_block.engine.kv_cache_manager import (
+    MultiBlockKVCacheManagerMixin,
+)
 
 
 @dataclass
@@ -20,7 +22,7 @@ class Page:
     ref_count: int = 0
     hash: int = -1
     token_ids: list[int] = field(default_factory=list)
-    
+
     req: DllmReq | None = None
 
     def update(self, hash: int, token_ids: list[int]):
@@ -32,18 +34,15 @@ class Page:
         self.hash = -1
         self.token_ids = []
         self.req = None
-        
+
     def set_req(self, req: DllmReq):
         self.req = weakref.ref(req)
-        
 
-class KVCacheManagerBase(
-    ABC,
-    MultiBlockKVCacheManagerMixin
-):
+
+class KVCacheManagerBase(ABC, MultiBlockKVCacheManagerMixin):
     def __init__(self, config: Config):
-        num_pages = config.num_kv_cache_pages
-        page_size = config.kv_cache_page_size
+        num_pages = config.num_pages
+        page_size = config.page_size
         assert num_pages > 0
         self.config = config
         self.page_size = page_size
@@ -55,8 +54,10 @@ class KVCacheManagerBase(
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
         h = xxhash.xxh64()
+
         if prefix != -1:
             h.update(prefix.to_bytes(8, "little"))
+
         h.update(np.array(token_ids).tobytes())
         return h.intdigest()
 
@@ -80,13 +81,17 @@ class KVCacheManagerBase(
         assert not req.page_table
         h = -1
         cache_miss = False
+
         for i in range(req.num_pages):
             token_ids = req.page(i)
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.page_size else -1
             page_id = self.hash_to_page_id.get(h, -1)
+
             if page_id == -1 or self.pages[page_id].token_ids != token_ids:
                 cache_miss = True
+
             req.page_cache_missed.append(cache_miss)
+
             if cache_miss:
                 page_id = self.free_page_ids[0]
                 page = self._allocate_page(page_id)
@@ -97,9 +102,11 @@ class KVCacheManagerBase(
                     page.ref_count += 1
                 else:
                     page = self._allocate_page(page_id)
+
             if h != -1:
                 page.update(h, token_ids)
                 self.hash_to_page_id[h] = page_id
+
             req.page_table.append(page_id)
 
     def free(self, req: DllmReq):
@@ -108,6 +115,7 @@ class KVCacheManagerBase(
             page.ref_count -= 1
             if page.ref_count == 0:
                 self._free_page(page_id)
+
         req.num_cached_tokens = 0
         req.page_table.clear()
 
@@ -128,6 +136,7 @@ class AutoKVCacheManager(DiffulexStrategyRegistry):
 
     @classmethod
     def from_config(cls, config: Config) -> KVCacheManagerBase:
+        cls._ensure_strategies_loaded()
         cls._MODULE_MAPPING: dict[str, KVCacheManagerFactory]
         candidates: list[str] = []
         for attr in ("decoding_strategy",):

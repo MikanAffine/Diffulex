@@ -59,14 +59,14 @@ class LLMEngine:
     def add_request(self, prompt: str | List[int], sampling_params: SamplingParams):
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
-            
+
         if self.engine_type == "causal_lm":
             seq = SequenceForCausalLM(prompt, sampling_params)
         elif self.engine_type == "diffusion_lm":
             seq = SequenceForDiffusionLM(prompt, sampling_params, config=self.config)
         else:
             raise ValueError(f"Unsupported engine type: {self.engine_type}")
-        
+
         seq.block_size = self.config.kv_cache_block_size
         self.scheduler.add(seq)
         # Return seq_id so caller can build a stable mapping
@@ -74,7 +74,7 @@ class LLMEngine:
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
-        sample_output = self.model_runner.call("run", seqs, is_prefill)
+        sample_output = self.model_runner.call("run", seqs)
         n_diff_steps = self.scheduler.postprocess(seqs, sample_output)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         if self.engine_type == "causal_lm":
@@ -85,7 +85,11 @@ class LLMEngine:
             else:
                 deltas = []
         else:
-            num_tokens = sum(seq.input_num_tokens + seq.new_tokens for seq in seqs) if is_prefill else sum(seq.new_tokens for seq in seqs)
+            num_tokens = (
+                sum(seq.input_num_tokens + seq.new_tokens for seq in seqs)
+                if is_prefill
+                else sum(seq.new_tokens for seq in seqs)
+            )
             # Diffusion decoding modifies tokens in-place; we currently don't stream intermediate edits
             deltas = []
         return outputs, num_tokens, is_prefill, n_diff_steps, deltas
@@ -109,7 +113,7 @@ class LLMEngine:
             sid = self.add_request(prompt, sp)
             seqid_to_idx[sid] = idx
         outputs = [None] * len(prompts)
-        prefill_throughput = decode_throughput = 0.
+        prefill_throughput = decode_throughput = 0.0
         n_steps = 0
         n_diff_steps = [-1] * len(prompts)
         while not self.is_finished():
@@ -121,10 +125,12 @@ class LLMEngine:
                     prefill_throughput = num_tokens / (perf_counter() - t)
                 else:
                     decode_throughput = num_tokens / (perf_counter() - t)
-                pbar.set_postfix({
-                    "Prefill": f"{int(prefill_throughput)}tok/s",
-                    "Decode": f"{int(decode_throughput)}tok/s",
-                })
+                pbar.set_postfix(
+                    {
+                        "Prefill": f"{int(prefill_throughput)}tok/s",
+                        "Decode": f"{int(decode_throughput)}tok/s",
+                    }
+                )
             if cur_n_diff_steps:
                 for seq_id, n_step in cur_n_diff_steps.items():
                     if seq_id in seqid_to_idx and n_step >= 0:
@@ -134,14 +140,21 @@ class LLMEngine:
                     outputs[seqid_to_idx[seq_id]] = token_ids
                 if use_tqdm:
                     pbar.update(1)
-        print(f"Finished in {n_steps} steps, prefill throughput: {prefill_throughput:.2f} tok/s, decode throughput: {decode_throughput:.2f} tok/s")
+        print(
+            f"Finished in {n_steps} steps, prefill throughput: {prefill_throughput:.2f} tok/s, decode throughput: {decode_throughput:.2f} tok/s"
+        )
         # Ensure all outputs are present
         assert all(toks is not None for toks in outputs), "Some sequences did not produce outputs"
-        outputs = [{
-            "text": self.tokenizer.decode(token_ids).split(self.tokenizer.eos_token)[0],
-            "token_ids": token_ids[:token_ids.index(self.config.eos)] if self.config.eos in token_ids else token_ids,
-            "n_diff_steps": n_diff_step,
-        } for token_ids, n_diff_step in zip(outputs, n_diff_steps)]
+        outputs = [
+            {
+                "text": self.tokenizer.decode(token_ids).split(self.tokenizer.eos_token)[0],
+                "token_ids": token_ids[: token_ids.index(self.config.eos)]
+                if self.config.eos in token_ids
+                else token_ids,
+                "n_diff_steps": n_diff_step,
+            }
+            for token_ids, n_diff_step in zip(outputs, n_diff_steps)
+        ]
         if use_tqdm:
             pbar.close()
         return outputs

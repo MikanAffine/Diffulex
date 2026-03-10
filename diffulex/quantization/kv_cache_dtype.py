@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover
     current_platform = None
 
 
-class kv_cacheDType(IntEnum):
+class KVCacheDType(IntEnum):
     BF16 = 0
     FP16 = 1
     FP32 = 2
@@ -21,8 +21,8 @@ class kv_cacheDType(IntEnum):
 
 
 @dataclass(frozen=True)
-class kv_cacheDTypeSpec:
-    enum: kv_cacheDType
+class KVCacheDTypeSpec:
+    enum: KVCacheDType
     is_fp8: bool
     fp8_view_dtype: torch.dtype | None
     fp8_min: float | None
@@ -46,8 +46,7 @@ def _normalize_kv_cache_dtype(kv_cache_dtype: str) -> str:
     }
     if s not in aliases:
         raise ValueError(
-            f"Unsupported kv_cache_dtype={kv_cache_dtype!r}. "
-            "Supported: bf16/fp16/fp32/fp8/fp8_e4m3/fp8_e5m2"
+            f"Unsupported kv_cache_dtype={kv_cache_dtype!r}. Supported: bf16/fp16/fp32/fp8/fp8_e4m3/fp8_e5m2"
         )
     return aliases[s]
 
@@ -65,31 +64,29 @@ def _get_fp8_e5m2_dtype() -> torch.dtype:
         return torch.float8_e5m2  # type: ignore[attr-defined]
     if hasattr(torch, "float8_e5m2fnuz"):
         return torch.float8_e5m2fnuz  # type: ignore[attr-defined]
-    raise RuntimeError(
-        "FP8 E5M2 requested but this torch build does not expose float8_e5m2 dtype."
-    )
+    raise RuntimeError("FP8 E5M2 requested but this torch build does not expose float8_e5m2 dtype.")
 
 
-def parse_kv_cache_dtype(kv_cache_dtype: str) -> kv_cacheDTypeSpec:
+def parse_kv_cache_dtype(kv_cache_dtype: str) -> KVCacheDTypeSpec:
     norm = _normalize_kv_cache_dtype(kv_cache_dtype)
     if norm == "bf16":
-        return kv_cacheDTypeSpec(kv_cacheDType.BF16, False, None, None, None)
+        return KVCacheDTypeSpec(KVCacheDType.BF16, False, None, None, None)
     if norm == "fp16":
-        return kv_cacheDTypeSpec(kv_cacheDType.FP16, False, None, None, None)
+        return KVCacheDTypeSpec(KVCacheDType.FP16, False, None, None, None)
     if norm == "fp32":
-        return kv_cacheDTypeSpec(kv_cacheDType.FP32, False, None, None, None)
+        return KVCacheDTypeSpec(KVCacheDType.FP32, False, None, None, None)
 
     if norm == "fp8_e4m3":
         fp8 = _get_fp8_e4m3_dtype()
-        enum = kv_cacheDType.FP8_E4M3
+        enum = KVCacheDType.FP8_E4M3
     elif norm == "fp8_e5m2":
         fp8 = _get_fp8_e5m2_dtype()
-        enum = kv_cacheDType.FP8_E5M2
+        enum = KVCacheDType.FP8_E5M2
     else:  # pragma: no cover
         raise AssertionError(norm)
 
     info = torch.finfo(fp8)
-    return kv_cacheDTypeSpec(
+    return KVCacheDTypeSpec(
         enum=enum,
         is_fp8=True,
         fp8_view_dtype=fp8,
@@ -114,9 +111,7 @@ def ensure_scale_tensor(
         if scale.numel() == 1:
             return torch.full((num_kv_heads,), float(scale.item()), device=device, dtype=dtype)
         if scale.numel() != num_kv_heads:
-            raise ValueError(
-                f"scale must be scalar or shape [num_kv_heads]={num_kv_heads}, got {tuple(scale.shape)}"
-            )
+            raise ValueError(f"scale must be scalar or shape [num_kv_heads]={num_kv_heads}, got {tuple(scale.shape)}")
         return scale.to(device=device, dtype=dtype).contiguous()
     raise TypeError(f"Unsupported scale type: {type(scale)}")
 
@@ -131,6 +126,4 @@ def view_fp8_cache(cache: torch.Tensor, kv_cache_dtype: str) -> torch.Tensor:
         return cache.view(spec.fp8_view_dtype)
     if cache.dtype == spec.fp8_view_dtype:
         return cache
-    raise AssertionError(
-        f"FP8 cache must be torch.uint8 (storage) or {spec.fp8_view_dtype}, got {cache.dtype}"
-    )
+    raise AssertionError(f"FP8 cache must be torch.uint8 (storage) or {spec.fp8_view_dtype}, got {cache.dtype}")

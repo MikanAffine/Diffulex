@@ -161,18 +161,34 @@ def build_forward_plan(
                         tp_dim=layer.tp_dim,
                         bias=bias,
                     )
-                _empty = (marlin_make_empty_g_idx(device) if marlin_make_empty_g_idx else
-                          torch.empty((0,), device=device, dtype=torch.int32))
+                _empty = (
+                    marlin_make_empty_g_idx(device)
+                    if marlin_make_empty_g_idx
+                    else torch.empty((0,), device=device, dtype=torch.int32)
+                )
                 g_idx = layer.gptq_marlin_g_idx if layer.gptq_marlin_g_idx.numel() > 0 else _empty
-                g_idx_sort = (layer.gptq_marlin_g_idx_sort_indices
-                              if layer.gptq_marlin_g_idx_sort_indices.numel() > 0 else _empty)
+                g_idx_sort = (
+                    layer.gptq_marlin_g_idx_sort_indices if layer.gptq_marlin_g_idx_sort_indices.numel() > 0 else _empty
+                )
                 row_parallel = bool(layer.tp_dim == 1)
                 has_g_idx = bool(g_idx.numel() > 0)
                 is_k_full = marlin_is_k_full(has_g_idx, row_parallel) if marlin_is_k_full else True
-                marlin_bias = marlin_permute_bias(bias) if bias is not None and marlin_permute_bias else (bias if bias is not None else None)
+                marlin_bias = (
+                    marlin_permute_bias(bias)
+                    if bias is not None and marlin_permute_bias
+                    else (bias if bias is not None else None)
+                )
                 reshaped_x = example_x.reshape(-1, example_x.shape[-1])
-                m, n, k = int(reshaped_x.shape[0]), int(out_features), int(reshaped_x.shape[1])
-                use_atomic_add = bool(should_use_atomic_add_reduce(m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype)) if should_use_atomic_add_reduce else False
+                m, n, k = (
+                    int(reshaped_x.shape[0]),
+                    int(out_features),
+                    int(reshaped_x.shape[1]),
+                )
+                use_atomic_add = (
+                    bool(should_use_atomic_add_reduce(m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype))
+                    if should_use_atomic_add_reduce
+                    else False
+                )
                 wtype = scalar_types.uint4b8 if bits == 4 else (scalar_types.uint8b128 if bits == 8 else None)
                 if wtype is None:
                     raise RuntimeError(f"gptq_marlin: unsupported weight_bits={bits} (expected 4 or 8)")
@@ -239,11 +255,27 @@ def build_forward_plan(
                         tp_dim=layer.tp_dim,
                         bias=bias,
                     )
-                empty = marlin_make_empty_g_idx(device) if marlin_make_empty_g_idx else torch.empty((0,), device=device, dtype=torch.int32)
-                marlin_bias = marlin_permute_bias(bias) if bias is not None and marlin_permute_bias else (bias if bias is not None else None)
+                empty = (
+                    marlin_make_empty_g_idx(device)
+                    if marlin_make_empty_g_idx
+                    else torch.empty((0,), device=device, dtype=torch.int32)
+                )
+                marlin_bias = (
+                    marlin_permute_bias(bias)
+                    if bias is not None and marlin_permute_bias
+                    else (bias if bias is not None else None)
+                )
                 reshaped_x = example_x.reshape(-1, example_x.shape[-1])
-                m, n, k = int(reshaped_x.shape[0]), int(out_features), int(reshaped_x.shape[1])
-                use_atomic_add = bool(should_use_atomic_add_reduce(m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype)) if should_use_atomic_add_reduce else False
+                m, n, k = (
+                    int(reshaped_x.shape[0]),
+                    int(out_features),
+                    int(reshaped_x.shape[1]),
+                )
+                use_atomic_add = (
+                    bool(should_use_atomic_add_reduce(m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype))
+                    if should_use_atomic_add_reduce
+                    else False
+                )
                 return DirectMarlinGemmPlan(
                     sig=s,
                     qweight=layer.awq_marlin_qweight,

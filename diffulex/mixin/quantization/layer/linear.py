@@ -22,6 +22,7 @@ from diffulex.quantization.linear_plans import ForwardPlanBase
 
 class LinearQuantizationMixin:
     """Mixin for Linear layer quantization: strategy, plan build, and weight/offline quant helpers."""
+
     def init_quantization(self, quant_kind: str = "other") -> None:
         """Register quant-related buffers, Python meta, and forward plan cache. Call once from layer __init__."""
         self.quant_kind = (quant_kind or "other").strip().lower() or "other"
@@ -30,7 +31,11 @@ class LinearQuantizationMixin:
         self.register_buffer("quant_weight_int8", torch.empty(0, dtype=torch.int8), persistent=False)
         self.register_buffer("quant_scales", torch.empty(0, dtype=torch.bfloat16), persistent=False)
         self.register_buffer("quant_scales_1xn", torch.empty(0, dtype=torch.bfloat16), persistent=False)
-        self.register_buffer("_weight_is_quantized", torch.tensor(False, dtype=torch.bool), persistent=False)
+        self.register_buffer(
+            "_weight_is_quantized",
+            torch.tensor(False, dtype=torch.bool),
+            persistent=False,
+        )
 
         # GPTQ/AWQ offline (vLLM-format): qweight/qzeros/scales; pack=32/bits, K=in_features, N=out_features.
         self.register_buffer("gptq_qweight", torch.empty(0, dtype=torch.int32), persistent=False)
@@ -40,22 +45,48 @@ class LinearQuantizationMixin:
         self.register_buffer("awq_qweight", torch.empty(0, dtype=torch.int32), persistent=False)
         self.register_buffer("awq_qzeros", torch.empty(0, dtype=torch.int32), persistent=False)
         self.register_buffer("awq_scales", torch.empty(0, dtype=torch.float16), persistent=False)
-        self.register_buffer("_offline_quant_format", torch.empty(0, dtype=torch.int8), persistent=False)  # 0=none, 1=gptq, 2=awq
+        self.register_buffer(
+            "_offline_quant_format", torch.empty(0, dtype=torch.int8), persistent=False
+        )  # 0=none, 1=gptq, 2=awq
         self.register_buffer("_offline_quant_bits", torch.tensor(0, dtype=torch.int32), persistent=False)
-        self.register_buffer("_offline_quant_group_size", torch.tensor(128, dtype=torch.int32), persistent=False)
-        self.register_buffer("_offline_quant_out_features", torch.tensor(0, dtype=torch.int32), persistent=False)
-        self.register_buffer("_offline_quant_in_features", torch.tensor(0, dtype=torch.int32), persistent=False)
+        self.register_buffer(
+            "_offline_quant_group_size",
+            torch.tensor(128, dtype=torch.int32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_offline_quant_out_features",
+            torch.tensor(0, dtype=torch.int32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_offline_quant_in_features",
+            torch.tensor(0, dtype=torch.int32),
+            persistent=False,
+        )
         self.register_buffer("_gptq_is_shuffled", torch.tensor(False, dtype=torch.bool), persistent=False)
 
         # vLLM Marlin one-time repack cache
-        self.register_buffer("_gptq_marlin_is_prepared", torch.tensor(False, dtype=torch.bool), persistent=False)
+        self.register_buffer(
+            "_gptq_marlin_is_prepared",
+            torch.tensor(False, dtype=torch.bool),
+            persistent=False,
+        )
         self.register_buffer("gptq_marlin_qweight", torch.empty(0, dtype=torch.int32), persistent=False)
         self.register_buffer("gptq_marlin_scales", torch.empty(0, dtype=torch.float16), persistent=False)
         self.register_buffer("gptq_marlin_zp", torch.empty(0, dtype=torch.int32), persistent=False)
         self.register_buffer("gptq_marlin_g_idx", torch.empty(0, dtype=torch.int32), persistent=False)
-        self.register_buffer("gptq_marlin_g_idx_sort_indices", torch.empty(0, dtype=torch.int32), persistent=False)
+        self.register_buffer(
+            "gptq_marlin_g_idx_sort_indices",
+            torch.empty(0, dtype=torch.int32),
+            persistent=False,
+        )
         self.register_buffer("gptq_marlin_workspace", torch.empty(0, dtype=torch.int32), persistent=False)
-        self.register_buffer("_awq_marlin_is_prepared", torch.tensor(False, dtype=torch.bool), persistent=False)
+        self.register_buffer(
+            "_awq_marlin_is_prepared",
+            torch.tensor(False, dtype=torch.bool),
+            persistent=False,
+        )
         self.register_buffer("awq_marlin_qweight", torch.empty(0, dtype=torch.int32), persistent=False)
         self.register_buffer("awq_marlin_scales", torch.empty(0, dtype=torch.float16), persistent=False)
         self.register_buffer("awq_marlin_zp", torch.empty(0, dtype=torch.int32), persistent=False)
@@ -75,7 +106,7 @@ class LinearQuantizationMixin:
         # Forward plan cache (unified bf16/quant dispatch; built by build_forward_plan_for_static)
         self._forward_plan_enabled: bool = False
         self._forward_plan: Optional[ForwardPlanBase] = None
-    
+
     def _forward_base(self, x: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
         """Unified forward dispatcher for bf16 / online quant / offline GPTQ/AWQ."""
         if getattr(self, "_forward_plan_enabled", False):
@@ -303,17 +334,9 @@ class LinearQuantizationMixin:
 
     def has_offline_quantized_weight(self) -> bool:
         if self._offline_quant_format_py == 1:
-            return (
-                self.gptq_qweight.numel() > 0
-                and self.gptq_qzeros.numel() > 0
-                and self.gptq_scales.numel() > 0
-            )
+            return self.gptq_qweight.numel() > 0 and self.gptq_qzeros.numel() > 0 and self.gptq_scales.numel() > 0
         elif self._offline_quant_format_py == 2:
-            return (
-                self.awq_qweight.numel() > 0
-                and self.awq_qzeros.numel() > 0
-                and self.awq_scales.numel() > 0
-            )
+            return self.awq_qweight.numel() > 0 and self.awq_qzeros.numel() > 0 and self.awq_scales.numel() > 0
         return False
 
     def set_offline_quantized_weight(
@@ -329,6 +352,7 @@ class LinearQuantizationMixin:
         g_idx: Optional[torch.Tensor] = None,
     ) -> None:
         """Set offline quantized weights (GPTQ or AWQ format)."""
+
         def _infer_module_device() -> torch.device:
             w = getattr(self, "weight", None)
             if isinstance(w, torch.Tensor):
@@ -554,17 +578,11 @@ class LinearQuantizationMixin:
                 )
             pack_factor = in_features // int(self.gptq_qweight.shape[0])
             if 32 % pack_factor != 0:
-                raise RuntimeError(
-                    f"GPTQ Marlin: unsupported pack_factor={pack_factor} (requires 32%pack_factor==0)"
-                )
+                raise RuntimeError(f"GPTQ Marlin: unsupported pack_factor={pack_factor} (requires 32%pack_factor==0)")
             weight_bits = 32 // pack_factor
         if weight_bits not in (4, 8):
-            raise RuntimeError(
-                f"GPTQ Marlin: only 4/8-bit are supported in this integration, got bits={weight_bits}"
-            )
-        already_marlin_ready = (
-            self.gptq_marlin_qweight.numel() > 0 and self.gptq_marlin_scales.numel() > 0
-        )
+            raise RuntimeError(f"GPTQ Marlin: only 4/8-bit are supported in this integration, got bits={weight_bits}")
+        already_marlin_ready = self.gptq_marlin_qweight.numel() > 0 and self.gptq_marlin_scales.numel() > 0
         if already_marlin_ready:
             if self.gptq_marlin_qweight.device != device or self.gptq_marlin_scales.device != device:
                 raise RuntimeError(
@@ -630,7 +648,7 @@ class LinearQuantizationMixin:
         if pack_factor != 8:
             raise RuntimeError(f"AWQ Marlin: expected pack_factor=8 (W4), got pack_factor={pack_factor}")
         weight_bits = 4
-        num_groups = (in_features // (in_features if group_size == -1 else group_size))
+        num_groups = in_features // (in_features if group_size == -1 else group_size)
         self.awq_marlin_workspace = marlin_make_workspace_new(device)
         self.awq_marlin_qweight = ops.awq_marlin_repack(
             self.awq_qweight.contiguous(),
@@ -706,7 +724,12 @@ class LinearQuantizationMixin:
         x: torch.Tensor,
         strategy,
         *,
-        expected_weight_formats: tuple[str, ...] = ("int8", "int4", "fp8_e4m3", "fp8_e5m2"),
+        expected_weight_formats: tuple[str, ...] = (
+            "int8",
+            "int4",
+            "fp8_e4m3",
+            "fp8_e5m2",
+        ),
     ) -> None:
         if strategy is None or self.has_offline_quantized_weight() or self.has_quantized_weight():
             return
@@ -717,7 +740,10 @@ class LinearQuantizationMixin:
         if weight_format not in expected_weight_formats or getattr(strategy, "name", "").startswith("linear_stub"):
             return
         w = getattr(self, "weight", None)
-        if w is None or getattr(w, "dtype", None) not in (torch.bfloat16, torch.float16):
+        if w is None or getattr(w, "dtype", None) not in (
+            torch.bfloat16,
+            torch.float16,
+        ):
             return
         try:
             qweight, scales = strategy.quantize_weight_for_kernel(w.data, device=w.data.device)
@@ -773,7 +799,9 @@ class LinearQuantizationMixin:
             )
         pack_factor = in_features // int(self.gptq_qweight.shape[0])
         if 32 % pack_factor != 0:
-            raise RuntimeError(f"GPTQ bits inference failed: pack_factor={pack_factor} does not satisfy 32%pack_factor==0")
+            raise RuntimeError(
+                f"GPTQ bits inference failed: pack_factor={pack_factor} does not satisfy 32%pack_factor==0"
+            )
         return 32 // pack_factor
 
     def _maybe_int4_original_in_features_kwargs(self, strategy, x: torch.Tensor) -> Optional[dict]:
@@ -787,7 +815,11 @@ class LinearQuantizationMixin:
         format_val = int(self._offline_quant_format_py)
         weight_format = getattr(strategy, "linear_weight_format", None)
         out_features, in_features, group_size = self._offline_meta()
-        meta = {"out_features": out_features, "in_features": in_features, "group_size": group_size}
+        meta = {
+            "out_features": out_features,
+            "in_features": in_features,
+            "group_size": group_size,
+        }
         if format_val == 1:
             if weight_format == "gptq":
                 self._maybe_prepare_offline_gptq(x)

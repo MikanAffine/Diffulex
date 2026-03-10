@@ -67,9 +67,15 @@ class DiffulexDPWorkerAsyncMixin:
         results = await asyncio.gather(*tasks)
         return all(results)
 
-    async def generate_async(self, prompts: list[str] | list[list[int]], sampling_params: SamplingParams | list[SamplingParams], use_tqdm: bool = True):
+    async def generate_async(
+        self,
+        prompts: list[str] | list[list[int]],
+        sampling_params: SamplingParams | list[SamplingParams],
+        use_tqdm: bool = True,
+    ):
         """Async version of generate that allows concurrent request handling."""
         import random
+
         n = len(prompts)
         idxs = list(range(n))
         random.shuffle(idxs)
@@ -115,14 +121,12 @@ class DiffulexDPWorkerAsyncMixin:
             await loop.run_in_executor(
                 self._executor,
                 conn.send,
-                ("generate", shuffled_prompts[start_idx:end_idx], sp_arg, use_tqdm)
+                ("generate", shuffled_prompts[start_idx:end_idx], sp_arg, use_tqdm),
             )
             return replica_idx
 
         # Send all requests concurrently
-        send_tasks = [
-            send_generate(i, s, e) for i, (s, e) in slices.items()
-        ]
+        send_tasks = [send_generate(i, s, e) for i, (s, e) in slices.items()]
         await asyncio.gather(*send_tasks)
 
         # Collect results asynchronously

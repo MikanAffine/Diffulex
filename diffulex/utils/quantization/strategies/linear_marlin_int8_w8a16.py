@@ -34,6 +34,7 @@ def _allspark_is_available() -> bool:
         and hasattr(_vllm_ops, "allspark_repack_weight")
     )
 
+
 def _allspark_repack_weight(b_qweight_kn: torch.Tensor, scales_1xn: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Repack KxN uint8 qweight + 1xN scales into (N_32,K) + (1,N_32) for AllSpark GEMM."""
     if _vllm_ops is None or not hasattr(_vllm_ops, "allspark_repack_weight"):
@@ -76,7 +77,13 @@ class LinearMarlinInt8W8A16Strategy(LinearQuantizationStrategy):
         except Exception:
             pass
         try:
-            thr = int(getattr(diffulex_config, "linear_w8a16_allspark_cublas_m_threshold", self._cublas_m_thr))
+            thr = int(
+                getattr(
+                    diffulex_config,
+                    "linear_w8a16_allspark_cublas_m_threshold",
+                    self._cublas_m_thr,
+                )
+            )
             self._cublas_m_thr = max(1, thr)
         except Exception:
             pass
@@ -258,7 +265,10 @@ class LinearMarlinInt8W8A16Strategy(LinearQuantizationStrategy):
         _ = quant_kind
         if not self._allspark_available or _vllm_ops is None:
             # correctness fallback only when bf16 weight exists
-            if weight is not None and getattr(weight, "dtype", None) in (torch.float16, torch.bfloat16):
+            if weight is not None and getattr(weight, "dtype", None) in (
+                torch.float16,
+                torch.bfloat16,
+            ):
                 return F.linear(x, weight, bias)
             raise RuntimeError(
                 "vLLM AllSpark W8A16 fused kernel is unavailable. "
@@ -268,7 +278,10 @@ class LinearMarlinInt8W8A16Strategy(LinearQuantizationStrategy):
         orig_shape = x.shape
         x2 = x.reshape(-1, x.shape[-1]) if x.dim() != 2 else x
         if x2.device.type != "cuda":
-            if weight is not None and getattr(weight, "dtype", None) in (torch.float16, torch.bfloat16):
+            if weight is not None and getattr(weight, "dtype", None) in (
+                torch.float16,
+                torch.bfloat16,
+            ):
                 return F.linear(x, weight, bias)
             raise RuntimeError("AllSpark W8A16 requires CUDA inputs.")
 
@@ -296,12 +309,19 @@ class LinearMarlinInt8W8A16Strategy(LinearQuantizationStrategy):
         m, k = x2.shape
         n_32, k_w = qweight.shape
         if k_w != k or (k & 15) != 0:
-            if weight is not None and getattr(weight, "dtype", None) in (torch.float16, torch.bfloat16):
+            if weight is not None and getattr(weight, "dtype", None) in (
+                torch.float16,
+                torch.bfloat16,
+            ):
                 y = F.linear(x, weight, bias)
                 return y
             raise RuntimeError(f"AllSpark W8A16 requires K%16==0 and matching K. Got x.K={k}, w.K={k_w}.")
 
-        n = int(out_features) if out_features is not None else (int(bias.numel()) if bias is not None else int(min(scales.numel(), n_32)))
+        n = (
+            int(out_features)
+            if out_features is not None
+            else (int(bias.numel()) if bias is not None else int(min(scales.numel(), n_32)))
+        )
         n = n_32 if (n <= 0 or n > n_32) else n
         scales_1xn = scales if scales.dim() == 2 else scales.view(1, -1)
 
@@ -329,4 +349,3 @@ class LinearMarlinInt8W8A16Strategy(LinearQuantizationStrategy):
 
     # NOTE: We intentionally do not provide a generic dequantize+F.linear fallback for reordered weights.
     # It materializes a full bf16 matrix and is prone to OOM on large models.
-

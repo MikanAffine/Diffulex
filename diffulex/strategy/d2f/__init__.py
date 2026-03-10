@@ -1,14 +1,15 @@
-"""D2F strategy component exports."""
+"""Block Diffusion strategy component exports."""
+
 from __future__ import annotations
 
-from .engine.kv_cache_manager import D2FKVCacheManager
-from .engine.model_runner import D2FModelRunner
-from .engine.scheduler import D2FScheduler
-from .engine.request import D2FReq
+from .engine.kv_cache_manager import D2fKVCacheManager
+from .engine.model_runner import D2fModelRunner
+from .engine.scheduler import D2fScheduler
+from .engine.request import D2fReq
 
 __all__ = [
-    "D2FKVCacheManager",
-    "D2FModelRunner",
-    "D2FScheduler",
-    "D2FReq",
+    "D2fKVCacheManager",
+    "D2fModelRunner",
+    "D2fScheduler",
+    "D2fReq",
 ]

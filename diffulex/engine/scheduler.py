@@ -9,10 +9,7 @@ from diffulex.engine.strategy_registry import DiffulexStrategyRegistry
 from diffulex.mixin.multi_block.engine.scheduler import SchedulerMultiBlockMixin
 
 
-class SchedulerBase(
-    ABC, 
-    SchedulerMultiBlockMixin
-):
+class SchedulerBase(ABC, SchedulerMultiBlockMixin):
     def __init__(self, config: Config):
         self.config = config
         self.max_num_reqs = config.max_num_reqs
@@ -50,6 +47,7 @@ class AutoScheduler(DiffulexStrategyRegistry):
 
     @classmethod
     def from_config(cls, config: Config) -> SchedulerBase:
+        cls._ensure_strategies_loaded()
         cls._MODULE_MAPPING: dict[str, SchedulerFactory]
         candidates: list[str] = []
         for attr in ("decoding_strategy",):

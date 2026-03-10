@@ -7,7 +7,9 @@ import tilelang.testing
 import torch.nn.functional as F
 from einops import rearrange
 
-from diffulex_kernel.python.dllm_flash_attn_kernels import dllm_flash_attn_prefill_kernel
+from diffulex_kernel.python.dllm_flash_attn_kernels import (
+    dllm_flash_attn_prefill_kernel,
+)
 
 
 def naive_sdpa_prefill(
@@ -39,9 +41,9 @@ def naive_sdpa_prefill(
         q_len = q_seq.shape[0]
         kv_len = k_seq.shape[0]
 
-        q_sdpa = rearrange(q_seq, 's h d -> 1 h s d') # [1, num_heads, q_len, head_dim]
-        k_sdpa = rearrange(k_seq, 's h d -> 1 h s d') # [1, num_heads, kv_len, head_dim]
-        v_sdpa = rearrange(v_seq, 's h d -> 1 h s d') # [1, num_heads, kv_len, head_dim]
+        q_sdpa = rearrange(q_seq, "s h d -> 1 h s d")  # [1, num_heads, q_len, head_dim]
+        k_sdpa = rearrange(k_seq, "s h d -> 1 h s d")  # [1, num_heads, kv_len, head_dim]
+        v_sdpa = rearrange(v_seq, "s h d -> 1 h s d")  # [1, num_heads, kv_len, head_dim]
 
         if not is_block_attn:
             attn_out = F.scaled_dot_product_attention(
@@ -72,7 +74,7 @@ def naive_sdpa_prefill(
                 enable_gqa=True,
             )
 
-        output[q_start:q_end] = rearrange(attn_out, '1 h s d -> s h d').to(output.dtype)
+        output[q_start:q_end] = rearrange(attn_out, "1 h s d -> s h d").to(output.dtype)
 
     return output
 
@@ -138,15 +140,19 @@ def run_dllm_flash_attn_prefill(
     print(f"Kernel source saved to {kernel_path}")
 
     output = prefill_kernel(
-        q, k, v,
+        q,
+        k,
+        v,
         cu_seqlens_q,
         cu_seqlens_k,
         max_q_len,
     )
 
-    scale = 1.0 / (head_dim ** 0.5)
+    scale = 1.0 / (head_dim**0.5)
     ref_output = naive_sdpa_prefill(
-        q, k, v,
+        q,
+        k,
+        v,
         cu_seqlens_q,
         cu_seqlens_k,
         scale,

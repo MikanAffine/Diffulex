@@ -85,4 +85,4 @@ Welcome to join our Discord community for discussions, support, and collaboratio
 
 ## Acknowledgments
 
-We would like to express our gratitude to [Nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm), which serves as the primary codebase foundation for this project, and [vLLM](https://github.com/vllm-project/vllm), from which we draw the core architectural concepts, particularly the Paged Attention mechanism. The initial version of this project was mainly developed by [Yijie Jin](https://github.com/drewjin0827) with supervision from Prof. [Zhijie Deng](https://thudzj.github.io) at Shanghai Jiao Tong University. 
+We would like to express our gratitude to [Nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm), which serves as the primary codebase foundation for this project, and [vLLM](https://github.com/vllm-project/vllm), from which we draw the core architectural concepts, particularly the Paged Attention mechanism. The initial version of this project was mainly developed by [Yijie Jin](https://github.com/drewjin0827) with supervision from Prof. [Zhijie Deng](https://thudzj.github.io) at Shanghai Jiao Tong University.

@@ -39,13 +39,24 @@ class AutoSampler:
             raise ValueError("sampler_name must be a non-empty string.")
 
         if sampler_class is _NOT_PROVIDED:
+
             def decorator(sampler_cls):
-                cls._register(sampler_name, sampler_cls, use_full_config=use_full_config, exist_ok=exist_ok)
+                cls._register(
+                    sampler_name,
+                    sampler_cls,
+                    use_full_config=use_full_config,
+                    exist_ok=exist_ok,
+                )
                 return sampler_cls
 
             return decorator
 
-        cls._register(sampler_name, sampler_class, use_full_config=use_full_config, exist_ok=exist_ok)
+        cls._register(
+            sampler_name,
+            sampler_class,
+            use_full_config=use_full_config,
+            exist_ok=exist_ok,
+        )
         return sampler_class
 
     @classmethod

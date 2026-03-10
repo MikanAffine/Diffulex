@@ -6,7 +6,6 @@ import torch.distributed as dist
 
 
 class VocabParallelEmbedding(nn.Module):
-
     def __init__(
         self,
         num_embeddings: int,

@@ -1,4 +1,5 @@
 """Diffulex sampler package that imports built-in samplers to trigger registration."""
+
 from __future__ import annotations
 import importlib
 from pathlib import Path
@@ -18,6 +19,7 @@ for py_file in _current_dir.glob("*.py"):
         except Exception as e:
             # Skip modules that fail to import
             import warnings
+
             warnings.warn(f"Failed to import {module_name}: {e}", ImportWarning)
 
 __all__ = _model_modules.copy()

@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import torch
-import torch.nn.functional as F
 
 from diffulex.utils.quantization.registry import register_linear_strategy
 from diffulex.utils.quantization.strategy import LinearQuantizationStrategy
@@ -128,7 +127,11 @@ class LinearGPTQMarlinW4A16Strategy(LinearQuantizationStrategy):
         if g_idx is None or g_idx.numel() == 0:
             empty = self._empty_cache.get(dev_key)
             if empty is None:
-                empty = marlin_make_empty_g_idx(device) if marlin_make_empty_g_idx is not None else torch.empty((0,), device=device, dtype=torch.int32)
+                empty = (
+                    marlin_make_empty_g_idx(device)
+                    if marlin_make_empty_g_idx is not None
+                    else torch.empty((0,), device=device, dtype=torch.int32)
+                )
                 self._empty_cache[dev_key] = empty
             g_idx_t = empty
         else:
@@ -136,7 +139,11 @@ class LinearGPTQMarlinW4A16Strategy(LinearQuantizationStrategy):
         if g_idx_sort_indices is None or g_idx_sort_indices.numel() == 0:
             empty = self._empty_cache.get(dev_key)
             if empty is None:
-                empty = marlin_make_empty_g_idx(device) if marlin_make_empty_g_idx is not None else torch.empty((0,), device=device, dtype=torch.int32)
+                empty = (
+                    marlin_make_empty_g_idx(device)
+                    if marlin_make_empty_g_idx is not None
+                    else torch.empty((0,), device=device, dtype=torch.int32)
+                )
                 self._empty_cache[dev_key] = empty
             g_idx_sort_t = empty
         else:
@@ -170,11 +177,7 @@ class LinearGPTQMarlinW4A16Strategy(LinearQuantizationStrategy):
             akey = (dev_key, dtype_id, m, n, k)
             cached = self._atomic_add_cache.get(akey)
             if cached is None:
-                cached = bool(
-                    should_use_atomic_add_reduce(
-                        m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype
-                    )
-                )
+                cached = bool(should_use_atomic_add_reduce(m=m, n=n, k=k, device=device, dtype=reshaped_x.dtype))
                 self._atomic_add_cache[akey] = cached
             use_atomic_add = cached
 
@@ -201,4 +204,3 @@ class LinearGPTQMarlinW4A16Strategy(LinearQuantizationStrategy):
             False,  # is_zp_float
         )
         return out.reshape(out_shape)
-

@@ -126,9 +126,7 @@ def _fwd_kernel(
         + offs_d[None, :] * stride_qd
     )
 
-    dim_mask = tl.where(tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(
-        tl.int1
-    )  # [D]
+    dim_mask = tl.where(tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(tl.int1)  # [D]
 
     q = tl.load(
         Q + off_q,
@@ -150,16 +148,10 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
     # compute query against context (no causal mask here)
-    for start_n in tl.range(
-        0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
-    ):
+    for start_n in tl.range(0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache):
         start_n = tl.multiple_of(start_n, BLOCK_SIZE)
         # -- compute qk ----
-        bn = tl.load(
-            B_Loc
-            + cur_batch * stride_b_loc_b
-            + (start_n // BLOCK_SIZE) * stride_b_loc_s
-        ).to(tl.int64)
+        bn = tl.load(B_Loc + cur_batch * stride_b_loc_b + (start_n // BLOCK_SIZE) * stride_b_loc_s).to(tl.int64)
         # [D,BLOCK_SIZE]
         off_k = (
             bn[None, :] * stride_k_cache_bs
@@ -177,14 +169,10 @@ def _fwd_kernel(
             + offs_bs_n[:, None] * stride_v_cache_bl
         )
 
-        if (
-            start_n + BLOCK_SIZE > cur_batch_ctx_len
-            or BLOCK_DMODEL != BLOCK_DMODEL_PADDED
-        ):
+        if start_n + BLOCK_SIZE > cur_batch_ctx_len or BLOCK_DMODEL != BLOCK_DMODEL_PADDED:
             k_load = tl.load(
                 K_cache + off_k,
-                mask=dim_mask[:, None]
-                & ((start_n + offs_bs_n[None, :]) < cur_batch_ctx_len),
+                mask=dim_mask[:, None] & ((start_n + offs_bs_n[None, :]) < cur_batch_ctx_len),
                 other=0.0,
             )  # [D,N]
         else:
@@ -197,9 +185,7 @@ def _fwd_kernel(
 
         qk = tl.zeros([BLOCK_M, BLOCK_SIZE], dtype=tl.float32)  # [M,N]
         qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
-        qk = tl.where(
-            (start_n + offs_bs_n[None, :]) < cur_batch_ctx_len, qk, float("-inf")
-        )
+        qk = tl.where((start_n + offs_bs_n[None, :]) < cur_batch_ctx_len, qk, float("-inf"))
         qk *= sm_scale
         if SLIDING_WINDOW > 0:
             # (cur_batch_ctx_len + offs_m[:, None]) are the positions of
@@ -214,8 +200,7 @@ def _fwd_kernel(
             # This then makes m_ij contain -inf, which causes NaNs in
             # exp().
             qk = tl.where(
-                (cur_batch_ctx_len + offs_m[:, None]) - (start_n + offs_bs_n[None, :])
-                < SLIDING_WINDOW,
+                (cur_batch_ctx_len + offs_m[:, None]) - (start_n + offs_bs_n[None, :]) < SLIDING_WINDOW,
                 qk,
                 -10000,
             )
@@ -228,14 +213,10 @@ def _fwd_kernel(
         acc = acc * alpha[:, None]
 
         # update acc
-        if (
-            start_n + BLOCK_SIZE > cur_batch_ctx_len
-            or BLOCK_DMODEL != BLOCK_DMODEL_PADDED
-        ):
+        if start_n + BLOCK_SIZE > cur_batch_ctx_len or BLOCK_DMODEL != BLOCK_DMODEL_PADDED:
             v_load = tl.load(
                 V_cache + off_v,
-                mask=dim_mask[None, :]
-                & ((start_n + offs_bs_n[:, None]) < cur_batch_ctx_len),
+                mask=dim_mask[None, :] & ((start_n + offs_bs_n[:, None]) < cur_batch_ctx_len),
                 other=0.0,
             )  # [N,D]
         else:
@@ -252,16 +233,8 @@ def _fwd_kernel(
         l_i = l_i * alpha + l_ij
         m_i = m_ij
 
-    off_k = (
-        offs_n[None, :] * stride_kbs
-        + cur_kv_head * stride_kh
-        + offs_d[:, None] * stride_kd
-    )
-    off_v = (
-        offs_n[:, None] * stride_vbs
-        + cur_kv_head * stride_vh
-        + offs_d[None, :] * stride_vd
-    )
+    off_k = offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
+    off_v = offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
     k_ptrs = K + off_k
     v_ptrs = V + off_v
 
@@ -279,8 +252,7 @@ def _fwd_kernel(
         # -- compute qk ----
         k = tl.load(
             k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-            mask=dim_mask[:, None]
-            & ((start_n + offs_n[None, :]) < cur_batch_query_len),
+            mask=dim_mask[:, None] & ((start_n + offs_n[None, :]) < cur_batch_query_len),
             other=0.0,
         )
 
@@ -306,8 +278,7 @@ def _fwd_kernel(
         # update acc
         v = tl.load(
             v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
-            mask=dim_mask[None, :]
-            & ((start_n + offs_n[:, None]) < cur_batch_query_len),
+            mask=dim_mask[None, :] & ((start_n + offs_n[:, None]) < cur_batch_query_len),
             other=0.0,
         )
         p = p.to(v.dtype)
@@ -329,9 +300,7 @@ def _fwd_kernel(
     if USE_FP8:
         acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
-    tl.store(
-        out_ptrs, acc, mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_query_len)
-    )
+    tl.store(out_ptrs, acc, mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_query_len))
     return
 
 
@@ -414,14 +383,11 @@ def _fwd_kernel_alibi(
         + offs_d[None, :] * stride_qd
     )
 
-    dim_mask = tl.where(tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(
-        tl.int1
-    )
+    dim_mask = tl.where(tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(tl.int1)
 
     q = tl.load(
         Q + off_q,
-        mask=dim_mask[None, :]
-        & (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len),
+        mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len),
         other=0.0,
     )
 
@@ -437,9 +403,7 @@ def _fwd_kernel_alibi(
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         bn = tl.load(
-            B_Loc
-            + cur_batch * stride_b_loc_b
-            + ((start_n + offs_n) // block_size) * stride_b_loc_s,
+            B_Loc + cur_batch * stride_b_loc_b + ((start_n + offs_n) // block_size) * stride_b_loc_s,
             mask=(start_n + offs_n) < cur_batch_ctx_len,
             other=0,
         ).to(tl.int64)
@@ -469,15 +433,11 @@ def _fwd_kernel_alibi(
 
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
-        qk = tl.where(
-            (start_n + offs_n[None, :]) < cur_batch_ctx_len, qk, float("-inf")
-        )
+        qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk, float("-inf"))
         qk *= sm_scale
 
         # load alibi
-        alibi = (
-            tl.arange(0, BLOCK_N)[None, :] + alibi_start_k - alibi_start_q[:, None]
-        ) * alibi_slope
+        alibi = (tl.arange(0, BLOCK_N)[None, :] + alibi_start_k - alibi_start_q[:, None]) * alibi_slope
         alibi = tl.where(
             (alibi <= 0) & (alibi_start_q[:, None] < cur_batch_seq_len),
             alibi,
@@ -518,16 +478,8 @@ def _fwd_kernel_alibi(
         l_i = l_i_new
         m_i = m_i_new
 
-    off_k = (
-        offs_n[None, :] * stride_kbs
-        + cur_kv_head * stride_kh
-        + offs_d[:, None] * stride_kd
-    )
-    off_v = (
-        offs_n[:, None] * stride_vbs
-        + cur_kv_head * stride_vh
-        + offs_d[None, :] * stride_vd
-    )
+    off_k = offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
+    off_v = offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
     k_ptrs = K + off_k
     v_ptrs = V + off_v
 
@@ -546,8 +498,7 @@ def _fwd_kernel_alibi(
         # -- compute qk ----
         k = tl.load(
             k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-            mask=dim_mask[:, None]
-            & ((start_n + offs_n[None, :]) < cur_batch_seq_len - cur_batch_ctx_len),
+            mask=dim_mask[:, None] & ((start_n + offs_n[None, :]) < cur_batch_seq_len - cur_batch_ctx_len),
             other=0.0,
         )
 
@@ -557,9 +508,7 @@ def _fwd_kernel_alibi(
         qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf"))
 
         # load alibi
-        alibi = (
-            tl.arange(0, BLOCK_N)[None, :] + alibi_start_k - alibi_start_q[:, None]
-        ) * alibi_slope
+        alibi = (tl.arange(0, BLOCK_N)[None, :] + alibi_start_k - alibi_start_q[:, None]) * alibi_slope
         alibi = tl.where(
             (alibi <= 0) & (alibi_start_q[:, None] < cur_batch_seq_len),
             alibi,
@@ -586,8 +535,7 @@ def _fwd_kernel_alibi(
         # update acc
         v = tl.load(
             v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
-            mask=dim_mask[None, :]
-            & ((start_n + offs_n[:, None]) < cur_batch_seq_len - cur_batch_ctx_len),
+            mask=dim_mask[None, :] & ((start_n + offs_n[:, None]) < cur_batch_seq_len - cur_batch_ctx_len),
             other=0.0,
         )
         p = p.to(v.dtype)
@@ -609,8 +557,7 @@ def _fwd_kernel_alibi(
     tl.store(
         out_ptrs,
         acc,
-        mask=dim_mask[None, :]
-        & (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len),
+        mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len),
     )
     return
 
@@ -662,11 +609,7 @@ def context_attention_fwd(
         k_cache = k_cache.view(target_dtype)
         v_cache = v_cache.view(target_dtype)
 
-    if (
-        k_cache.dtype == torch.uint8
-        or v_cache.dtype == torch.uint8
-        and kv_cache_dtype == "auto"
-    ):
+    if k_cache.dtype == torch.uint8 or v_cache.dtype == torch.uint8 and kv_cache_dtype == "auto":
         raise ValueError(
             "kv_cache_dtype='auto' unsupported for\
             FP8 KV Cache prefill kernel"

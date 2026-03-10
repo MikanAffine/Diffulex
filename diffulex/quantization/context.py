@@ -54,9 +54,7 @@ class QuantizationContext:
             return None
         if isinstance(strategy, KVCacheQuantizationStrategy):
             return strategy
-        raise TypeError(
-            f"KV cache strategy must be kv_cacheQuantizationStrategy, got {type(strategy)}"
-        )
+        raise TypeError(f"KV cache strategy must be kv_cacheQuantizationStrategy, got {type(strategy)}")
 
     def get_weight_strategy(self) -> Optional[WeightQuantizationStrategy]:
         """Get weight quantization strategy."""
@@ -65,9 +63,7 @@ class QuantizationContext:
             return None
         if isinstance(strategy, WeightQuantizationStrategy):
             return strategy
-        raise TypeError(
-            f"Weight strategy must be WeightQuantizationStrategy, got {type(strategy)}"
-        )
+        raise TypeError(f"Weight strategy must be WeightQuantizationStrategy, got {type(strategy)}")
 
     def set_linear_strategy(self, kind: str, strategy: LinearQuantizationStrategy) -> None:
         """Set Linear quantization strategy for a kind ("attn"/"mlp"/"other")."""
@@ -82,9 +78,7 @@ class QuantizationContext:
             return None
         if isinstance(strategy, LinearQuantizationStrategy):
             return strategy
-        raise TypeError(
-            f"{key} strategy must be LinearQuantizationStrategy, got {type(strategy)}"
-        )
+        raise TypeError(f"{key} strategy must be LinearQuantizationStrategy, got {type(strategy)}")
 
     def clear(self):
         """Clear all strategies."""

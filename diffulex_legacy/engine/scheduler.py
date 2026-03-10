@@ -1,13 +1,13 @@
-import torch
-
 from collections import deque
 from abc import ABC, abstractmethod
 from typing import Tuple, List, Deque
 
 from diffulex_legacy.config import Config
 from diffulex_legacy.engine.sequence import (
-    SequenceBase, SequenceStatus, 
-    SequenceForDiffusionLM, SequenceForCausalLM
+    SequenceBase,
+    SequenceStatus,
+    SequenceForDiffusionLM,
+    SequenceForCausalLM,
 )
 from diffulex_legacy.layers.sampler import SampleOutputForDiffusionLM
 from diffulex_legacy.engine.block_manager import AutoBlockManager
@@ -25,28 +25,28 @@ class SchedulerBase(ABC):
     @abstractmethod
     def is_finished(self) -> bool:
         pass
-    
+
     @abstractmethod
     def add(self, seq: SequenceBase) -> None:
         pass
-    
+
     @abstractmethod
     def schedule(self) -> Tuple[List[SequenceBase], bool]:
         pass
-    
+
     @abstractmethod
     def preempt(self, seq: SequenceBase) -> None:
         pass
-    
+
     @abstractmethod
     def postprocess(self, seqs: List[SequenceBase], token_ids: List[int]):
         pass
-    
+
 
 class SchedulerForCausalLM(SchedulerBase):
     def __init__(self, config: Config):
         super().__init__(config)
-        
+
     def is_finished(self) -> bool:
         return not self.waiting and not self.running
 
@@ -60,8 +60,7 @@ class SchedulerForCausalLM(SchedulerBase):
         num_batched_tokens = 0
         while self.waiting and num_seqs < self.max_num_seqs:
             seq = self.waiting[0]
-            if num_batched_tokens + len(seq) > self.max_num_batched_tokens \
-                or not self.block_manager.can_allocate(seq):
+            if num_batched_tokens + len(seq) > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
                 break
             num_seqs += 1
             self.block_manager.allocate(seq)
@@ -106,7 +105,9 @@ class SchedulerForCausalLM(SchedulerBase):
                 infos.append(
                     f"[{j}] status={s.status.name}, len={len(s)}, new_tokens={getattr(s, 'num_completion_tokens', getattr(s, 'new_tokens', '?'))}, cached={getattr(s, 'num_cached_tokens', '?')}, can_append={cap}"
                 )
-            raise RuntimeError(f"SchedulerForCausalLM: unable to schedule any sequence in decode; state={diag}; details={' | '.join(infos)}")
+            raise RuntimeError(
+                f"SchedulerForCausalLM: unable to schedule any sequence in decode; state={diag}; details={' | '.join(infos)}"
+            )
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 
@@ -118,8 +119,7 @@ class SchedulerForCausalLM(SchedulerBase):
     def postprocess(self, seqs: List[SequenceForCausalLM], token_ids: List[int]) -> None:
         for seq, token_id in zip(seqs, token_ids):
             seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) \
-                or seq.num_completion_tokens == seq.max_tokens:
+            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.free(seq)
                 self.running.remove(seq)
@@ -136,7 +136,7 @@ class SchedulerForDiffusionLM(SchedulerBase):
 
     def add(self, seq: SequenceForDiffusionLM) -> None:
         self.waiting.append(seq)
-    
+
     def schedule(self):
         # prefill
         scheduled_seqs = []
@@ -144,7 +144,9 @@ class SchedulerForDiffusionLM(SchedulerBase):
         num_batched_tokens = 0
         while self.waiting and num_seqs < self.max_num_seqs:
             seq = self.waiting[0]
-            if num_batched_tokens + len(seq) + seq.diffusion_block_size > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
+            if num_batched_tokens + len(
+                seq
+            ) + seq.diffusion_block_size > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
                 break
             num_seqs += 1
             self.block_manager.allocate(seq)
@@ -176,7 +178,7 @@ class SchedulerForDiffusionLM(SchedulerBase):
                 "running": len(self.running),
                 "max_num_seqs": self.max_num_seqs,
                 "max_num_batched_tokens": self.max_num_batched_tokens,
-                "diffusion_block_size": getattr(self, 'diffusion_block_size', None),
+                "diffusion_block_size": getattr(self, "diffusion_block_size", None),
             }
             candidates = list(self.running)[:3] + list(self.waiting)[:2]
             infos = []
@@ -188,7 +190,9 @@ class SchedulerForDiffusionLM(SchedulerBase):
                 infos.append(
                     f"[{j}] status={s.status.name}, len={len(s)}, diff_block={getattr(s, 'diffusion_block_size', '?')}, new_tokens={getattr(s, 'new_tokens', '?')}, cached={getattr(s, 'num_cached_tokens', '?')}, can_append={cap}"
                 )
-            raise RuntimeError(f"SchedulerForDiffusionLM: unable to schedule any sequence in decode; state={diag}; details={' | '.join(infos)}")
+            raise RuntimeError(
+                f"SchedulerForDiffusionLM: unable to schedule any sequence in decode; state={diag}; details={' | '.join(infos)}"
+            )
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 
@@ -197,7 +201,11 @@ class SchedulerForDiffusionLM(SchedulerBase):
         self.block_manager.free(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: List[SequenceForDiffusionLM], sample_output: SampleOutputForDiffusionLM) -> None:
+    def postprocess(
+        self,
+        seqs: List[SequenceForDiffusionLM],
+        sample_output: SampleOutputForDiffusionLM,
+    ) -> None:
         n_diff_steps = {}
         for seq in seqs:
             seq.reset_new_tokens()
@@ -213,8 +221,9 @@ class SchedulerForDiffusionLM(SchedulerBase):
 
                     for true_local_id, accepted_id in zip(true_local_ids, accepted_ids):
                         diffusion_block.modify_token(true_local_id, sampled_tokens[accepted_id])
-                        if ((not seq.ignore_eos and sampled_tokens[accepted_id].item() == self.eos) 
-                            or seq.num_completion_tokens >= seq.max_tokens):
+                        if (
+                            not seq.ignore_eos and sampled_tokens[accepted_id].item() == self.eos
+                        ) or seq.num_completion_tokens >= seq.max_tokens:
                             seq.meet_eos = True
             if seq.meet_eos and seq.diffusion_blocks[-1].available_to_cache:
                 seq.status = SequenceStatus.FINISHED
@@ -224,11 +233,13 @@ class SchedulerForDiffusionLM(SchedulerBase):
             seq.post_process()
         return n_diff_steps
 
+
 class AutoScheduler:
     SCHEDULER_MAPPING = {
         "causal_lm": SchedulerForCausalLM,
         "diffusion_lm": SchedulerForDiffusionLM,
     }
+
     @classmethod
     def from_config(cls, config: Config):
         return cls.SCHEDULER_MAPPING[config.model_type](config)

@@ -7,8 +7,8 @@ from typing import Optional
 from diffulex.quantization.context import QuantizationContext
 from diffulex.quantization.config import QuantizationConfig
 from diffulex.quantization.registry import (
-    create_kv_cache_strategy as _create_kv_cache_strategy, 
-    create_linear_strategy as _create_linear_strategy
+    create_kv_cache_strategy as _create_kv_cache_strategy,
+    create_linear_strategy as _create_linear_strategy,
 )
 from diffulex.quantization.strategy import KVCacheQuantizationStrategy
 
@@ -19,7 +19,9 @@ class QuantizationStrategyFactory:
     """Quantization strategy factory."""
 
     @staticmethod
-    def create_kv_cache_strategy(dtype: Optional[str] = None) -> KVCacheQuantizationStrategy:
+    def create_kv_cache_strategy(
+        dtype: Optional[str] = None,
+    ) -> KVCacheQuantizationStrategy:
         return _create_kv_cache_strategy(dtype or "bf16")
 
     @staticmethod

@@ -13,7 +13,7 @@
     # 列出所有线性层及其量化状态
     python test_gptq_awq_loading.py --format gptq --model-path /path/to/checkpoint --list-layers
 """
-import os
+
 import sys
 import argparse
 from pathlib import Path
@@ -32,7 +32,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from diffulex.config import Config
 from diffulex.model import AutoModelForDiffusionLM
-from diffulex.utils.quantization.context import get_linear_strategy
 
 
 def list_quantized_layers(model, format_name: str):
@@ -42,12 +41,12 @@ def list_quantized_layers(model, format_name: str):
     print("=" * 80)
     print(f"{'模块名称':<50} {'类型':<15} {'量化状态':<15}")
     print("-" * 80)
-    
+
     gptq_count = 0
     awq_count = 0
     other_count = 0
     no_quant_count = 0
-    
+
     for name, module in model.named_modules():
         if hasattr(module, "has_offline_quantized_weight"):
             if module.has_offline_quantized_weight():
@@ -74,9 +73,9 @@ def list_quantized_layers(model, format_name: str):
                 if "Linear" in module_type:
                     print(f"{name:<50} {module_type:<15} {quant_status:<15}")
                     no_quant_count += 1
-    
+
     print("-" * 80)
-    print(f"\n统计:")
+    print("\n统计:")
     print(f"  - GPTQ 离线量化层: {gptq_count}")
     print(f"  - AWQ 离线量化层: {awq_count}")
     print(f"  - 运行时量化层: {other_count}")
@@ -89,35 +88,34 @@ def test_model_forward(model, config, num_test_inputs: int = 2):
     print("\n" + "=" * 80)
     print("测试模型前向传播")
     print("=" * 80)
-    
+
     # 获取模型的输入大小（从第一个线性层的 input_size 推断）
     hidden_size = None
     for name, module in model.named_modules():
         if hasattr(module, "input_size"):
             hidden_size = module.input_size
             break
-    
+
     if hidden_size is None:
         print("⚠ 无法确定模型的 hidden_size，跳过前向传播测试")
         return
-    
+
     print(f"使用 hidden_size={hidden_size}")
-    
+
     try:
         import torch
-        import torch.nn.functional as F
-        
+
         # 创建测试输入
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         test_inputs = []
         for i in range(num_test_inputs):
             x = torch.randn(1, hidden_size, dtype=torch.bfloat16, device=device)
             test_inputs.append(x)
-        
+
         print(f"\n运行 {len(test_inputs)} 个测试输入...")
         for i, x in enumerate(test_inputs):
-            print(f"\n  测试输入 {i+1}/{len(test_inputs)}: shape={x.shape}, dtype={x.dtype}")
-            
+            print(f"\n  测试输入 {i + 1}/{len(test_inputs)}: shape={x.shape}, dtype={x.dtype}")
+
             # 测试第一个线性层的 forward
             found_linear = False
             for name, module in model.named_modules():
@@ -130,17 +128,19 @@ def test_model_forward(model, config, num_test_inputs: int = 2):
                     except Exception as e:
                         print(f"    ✗ {name}: 错误 - {e}")
                         import traceback
+
                         traceback.print_exc()
                         break
-            
+
             if not found_linear:
-                print(f"    ⚠ 未找到可测试的线性层")
-        
+                print("    ⚠ 未找到可测试的线性层")
+
         print("\n✓ 前向传播测试完成")
-        
+
     except Exception as e:
         print(f"\n✗ 前向传播测试失败: {e}")
         import traceback
+
         traceback.print_exc()
 
 
@@ -153,57 +153,44 @@ def main():
   %(prog)s --format gptq --model-path /path/to/gptq/checkpoint
   %(prog)s --format awq --model-path /path/to/awq/checkpoint
   %(prog)s --format gptq --model-path /path/to/checkpoint --list-layers --test-forward
-        """
+        """,
     )
-    
+
     parser.add_argument(
         "--format",
         type=str,
         choices=["gptq", "awq"],
         required=True,
-        help="量化格式: 'gptq' 或 'awq'"
+        help="量化格式: 'gptq' 或 'awq'",
     )
     parser.add_argument(
         "--model-path",
         type=str,
         required=True,
-        help="模型 checkpoint 路径（包含 .safetensors 文件）"
+        help="模型 checkpoint 路径（包含 .safetensors 文件）",
     )
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        default="dream",
-        help="模型名称（默认: 'dream'）"
-    )
-    parser.add_argument(
-        "--list-layers",
-        action="store_true",
-        help="列出所有线性层及其量化状态"
-    )
-    parser.add_argument(
-        "--test-forward",
-        action="store_true",
-        help="测试模型前向传播"
-    )
+    parser.add_argument("--model-name", type=str, default="dream", help="模型名称（默认: 'dream'）")
+    parser.add_argument("--list-layers", action="store_true", help="列出所有线性层及其量化状态")
+    parser.add_argument("--test-forward", action="store_true", help="测试模型前向传播")
     parser.add_argument(
         "--tensor-parallel-size",
         type=int,
         default=1,
-        help="Tensor parallel size (默认: 1，仅 TP=1 支持离线量化权重加载)"
+        help="Tensor parallel size (默认: 1，仅 TP=1 支持离线量化权重加载)",
     )
-    
+
     args = parser.parse_args()
-    
+
     # 验证模型路径
     model_path = Path(args.model_path)
     if not model_path.exists():
         print(f"错误: 模型路径不存在: {model_path}")
         sys.exit(1)
-    
+
     safetensors_files = list(model_path.glob("*.safetensors"))
     if not safetensors_files:
         print(f"警告: 在 {model_path} 中未找到 .safetensors 文件")
-    
+
     print("=" * 80)
     print("GPTQ/AWQ 离线量化权重加载测试")
     print("=" * 80)
@@ -213,7 +200,7 @@ def main():
     print(f"Tensor Parallel Size: {args.tensor_parallel_size}")
     print(f"找到 {len(safetensors_files)} 个 .safetensors 文件")
     print("=" * 80)
-    
+
     # 检查 safetensors 文件中是否包含 GPTQ/AWQ keys
     if safetensors_files:
         print("\n检查 checkpoint 中的量化 keys...")
@@ -221,6 +208,7 @@ def main():
         awq_keys = []
         for file in safetensors_files:
             from safetensors import safe_open
+
             with safe_open(file, "pt", "cpu") as f:
                 for key in f.keys():
                     if key.endswith(".qweight"):
@@ -234,11 +222,11 @@ def main():
                         awq_keys.append(key)
                     elif key.endswith(".g_idx"):
                         gptq_keys.append(key)
-        
+
         print(f"  找到 {len(set(k.rsplit('.', 1)[0] for k in gptq_keys if k.endswith('.qweight')))} 个可能的量化层")
         if gptq_keys and args.format == "gptq":
             print(f"  找到 {len([k for k in gptq_keys if k.endswith('.g_idx')])} 个 g_idx keys (GPTQ)")
-    
+
     # 创建配置
     try:
         config = Config(
@@ -253,7 +241,7 @@ def main():
             use_lora=False,
             gpu_memory_utilization=0.3,
             max_num_batched_tokens=1024,
-            max_num_seqs=4,
+            max_num_reqs=4,
             max_model_len=1024,
             decoding_strategy="d2f",
             enforce_eager=True,
@@ -262,14 +250,15 @@ def main():
     except Exception as e:
         print(f"\n✗ 配置创建失败: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
-    
+
     # 检查 TP 支持
     if args.tensor_parallel_size > 1:
         print("\n⚠ 警告: Tensor Parallel > 1 目前不完全支持离线量化权重加载")
         print("  如果遇到问题，请使用 --tensor-parallel-size 1")
-    
+
     # 加载模型
     print("\n加载模型...")
     try:
@@ -278,17 +267,18 @@ def main():
     except Exception as e:
         print(f"\n✗ 模型加载失败: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
-    
+
     # 列出量化层
     if args.list_layers:
         list_quantized_layers(model, args.format)
-    
+
     # 测试前向传播
     if args.test_forward:
         test_model_forward(model, config)
-    
+
     print("\n" + "=" * 80)
     print("测试完成")
     print("=" * 80)

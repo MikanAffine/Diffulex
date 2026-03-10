@@ -9,6 +9,7 @@ from diffulex.utils.loader import load_model
 _NOT_PROVIDED = object()
 RegistryEntry = tuple[Callable[[Any], Any] | type | None, bool]
 
+
 class AutoModelForDiffusionLM:
     """Factory and registry for diffusion language models."""
 
@@ -80,8 +81,14 @@ class AutoModelForDiffusionLM:
             raise ValueError("model_name must be a non-empty string.")
 
         if model_class is _NOT_PROVIDED:
+
             def decorator(model_cls):
-                cls._register(model_name, model_cls, use_full_config=use_full_config, exist_ok=exist_ok)
+                cls._register(
+                    model_name,
+                    model_cls,
+                    use_full_config=use_full_config,
+                    exist_ok=exist_ok,
+                )
                 return model_cls
 
             return decorator
@@ -138,6 +145,7 @@ class AutoModelForDiffusionLM:
 
         model = factory(init_arg)
         return load_model(model, config)
+
 
 # Backwards compatibility with the old name while callers migrate.
 AutoModelLM = AutoModelForDiffusionLM

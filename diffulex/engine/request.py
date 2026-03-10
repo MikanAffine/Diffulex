@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import torch
-
 from copy import copy
 from itertools import count
 from typing import Callable
-from dataclasses import dataclass, field
 
-from diffulex.config import Config, DecodingThresholds
+from diffulex.config import Config
 from diffulex.sampling_params import SamplingParams
 from diffulex.engine.strategy_registry import DiffulexStrategyRegistry
-from diffulex.engine.dllm_block import DllmBlock, DllmBlockBuffer
-from diffulex.engine.status import DllmBlockStatus, DllmBlockType, DllmReqStatus
+from diffulex.engine.status import DllmReqStatus
 from diffulex.mixin.multi_block.engine.request import DllmReqMultiBlockMixin
 
 
@@ -38,13 +34,14 @@ class DllmReq(DllmReqMultiBlockMixin):
         self.new_tokens = 0
         self.num_nfes = 0
         self.meet_eos = False
-    
+        self.is_multi_block = False
+
     def __len__(self) -> int:
         return self.num_tokens
 
     def __getitem__(self, key) -> int:
         return self.token_ids[key]
-    
+
     @property
     def num_tokens(self) -> int:
         return len(self.token_ids)
@@ -55,16 +52,19 @@ class DllmReq(DllmReqMultiBlockMixin):
 
     @property
     def prompt_token_ids(self) -> list[int]:
-        return self.token_ids[:self.num_prompt_tokens]
+        return self.token_ids[: self.num_prompt_tokens]
 
     @property
     def num_pages(self) -> int:
-        return (self.num_tokens + self.page_size - 1) // self.page_size
+        if self.is_multi_block:
+            return (self.running_len + self.page_size - 1) // self.page_size
+        else:
+            return (self.num_tokens + self.page_size - 1) // self.page_size
 
     @property
     def last_page_num_tokens(self) -> int:
         return self.num_tokens - (self.num_pages - 1) * self.page_size
-    
+
     def reset_new_tokens(self):
         self.new_tokens = 0
 

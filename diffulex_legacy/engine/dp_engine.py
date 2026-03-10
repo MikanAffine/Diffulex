@@ -52,7 +52,10 @@ def _dp_child_entry(config: Config, dp_idx: int, local_devices: list[int], conn)
         )
         setattr(cfg, "device_start", 0)
 
-        engine = LLMEngine(cfg.model, **{k: getattr(cfg, k) for k in cfg.__dataclass_fields__.keys() if k != "model"})
+        engine = LLMEngine(
+            cfg.model,
+            **{k: getattr(cfg, k) for k in cfg.__dataclass_fields__.keys() if k != "model"},
+        )
 
         while True:
             msg = conn.recv()
@@ -88,13 +91,18 @@ def _dp_child_entry(config: Config, dp_idx: int, local_devices: list[int], conn)
         except Exception:
             pass
         try:
-            print(f"[DP Child {dp_idx}] Unhandled exception:\n{msg}", file=sys.stderr, flush=True)
+            print(
+                f"[DP Child {dp_idx}] Unhandled exception:\n{msg}",
+                file=sys.stderr,
+                flush=True,
+            )
         except Exception:
             pass
 
 
 class DPEngine:
     """Data-parallel wrapper that runs N independent TP groups as child processes and aggregates results."""
+
     def __init__(self, model, **kwargs):
         config_fields = {f for f in Config.__dataclass_fields__.keys()}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
@@ -108,17 +116,19 @@ class DPEngine:
         # Topology check and mapping
         base_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
         if base_visible:
-            vis = [int(x) for x in base_visible.split(',') if x.strip() != '']
+            vis = [int(x) for x in base_visible.split(",") if x.strip() != ""]
         else:
             vis = list(range(torch.cuda.device_count()))
 
         need_gpus = self.dp_size * cfg.tensor_parallel_size
-        assert len(vis) >= need_gpus, f"Require {need_gpus} GPUs (dp={self.dp_size}, tp={cfg.tensor_parallel_size}), visible {len(vis)}"
+        assert len(vis) >= need_gpus, (
+            f"Require {need_gpus} GPUs (dp={self.dp_size}, tp={cfg.tensor_parallel_size}), visible {len(vis)}"
+        )
 
         # Optional overrides: kwargs['device_ids']
         override = None
-        if 'device_ids' in kwargs and kwargs['device_ids']:
-            override = list(kwargs['device_ids'])
+        if "device_ids" in kwargs and kwargs["device_ids"]:
+            override = list(kwargs["device_ids"])
         if override is not None:
             assert len(override) >= need_gpus, f"device_ids length {len(override)} < required {need_gpus}"
             # All override devices must be in visible list
@@ -129,7 +139,7 @@ class DPEngine:
 
         tp = cfg.tensor_parallel_size
         for dp_idx in range(self.dp_size):
-            local_devices = plan[dp_idx*tp:(dp_idx+1)*tp]
+            local_devices = plan[dp_idx * tp : (dp_idx + 1) * tp]
             parent_conn, child_conn = ctx.Pipe()
             p = ctx.Process(target=_dp_child_entry, args=(cfg, dp_idx, local_devices, child_conn))
             p.start()
@@ -208,13 +218,19 @@ class DPEngine:
     def is_finished(self):
         return all(self._ask(i, "is_finished") for i in range(self.dp_size))
 
-    def generate(self, prompts: List[str] | List[List[int]], sampling_params: SamplingParams | List[SamplingParams], use_tqdm: bool = True):
+    def generate(
+        self,
+        prompts: List[str] | List[List[int]],
+        sampling_params: SamplingParams | List[SamplingParams],
+        use_tqdm: bool = True,
+    ):
         """Load-balanced generate with random shuffling and stable order restoration.
         - Randomly shuffle inputs to balance load across DP replicas.
         - Partition shuffled list evenly among replicas.
         - Send to children, collect outputs, then unshuffle to original order.
         """
         import random
+
         n = len(prompts)
         idxs = list(range(n))
         random.shuffle(idxs)

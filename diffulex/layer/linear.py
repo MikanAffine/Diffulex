@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -17,38 +16,39 @@ def divide(numerator, denominator):
 
 class LoRAMixin:
     """Mixin class to add LoRA support to existing linear layers."""
+
     def __init_lora__(self, r: int = 0, lora_alpha: float = 1.0, lora_dropout: float = 0.0):
         if r > 0:
             self.r = r
             self.lora_alpha = lora_alpha
             self.scaling = lora_alpha / r
-            
+
             # Initialize LoRA parameters
-            if hasattr(self, 'output_size_per_partition'):
+            if hasattr(self, "output_size_per_partition"):
                 out_features = self.output_size_per_partition
             else:
                 out_features = self.output_size
-            
-            if hasattr(self, 'input_size_per_partition'):
+
+            if hasattr(self, "input_size_per_partition"):
                 in_features = self.input_size_per_partition
             else:
                 in_features = self.input_size
-            
+
             self.lora_A = nn.Parameter(torch.zeros(r, in_features))
             self.lora_B = nn.Parameter(torch.zeros(out_features, r))
             self.lora_dropout = nn.Dropout(lora_dropout) if lora_dropout > 0 else nn.Identity()
             self.merged = False
-            
+
             # Initialize weights
             nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
             nn.init.zeros_(self.lora_B)
         else:
             self.r = 0
             self.merged = True
-    
+
     def merge_lora(self):
         """Merge LoRA weights into base weight."""
-        if not (hasattr(self, 'r') and self.r > 0 and not self.merged):
+        if not (hasattr(self, "r") and self.r > 0 and not self.merged):
             return
         # If base weight is missing (e.g., quantized linear removed bf16 weight Parameter),
         # we cannot merge in-place. Keep LoRA unmerged and apply via lora_forward.
@@ -57,19 +57,18 @@ class LoRAMixin:
             return
         self.weight.data += self.scaling * torch.mm(self.lora_B, self.lora_A)
         self.merged = True
-    
+
     def lora_forward(self, x: torch.Tensor, base_output: torch.Tensor) -> torch.Tensor:
         """Apply LoRA forward pass."""
-        if not hasattr(self, 'r') or self.r == 0 or self.merged:
+        if not hasattr(self, "r") or self.r == 0 or self.merged:
             return base_output
-        
+
         lora_out = F.linear(self.lora_dropout(x), self.lora_A.T)
         lora_out = F.linear(lora_out, self.lora_B.T)
         return base_output + lora_out * self.scaling
 
 
 class LinearBase(LinearQuantizationMixin, nn.Module):
-
     def __init__(
         self,
         input_size: int,
@@ -90,7 +89,6 @@ class LinearBase(LinearQuantizationMixin, nn.Module):
 
 
 class ReplicatedLinear(LinearBase, LoRAMixin):
-
     def __init__(
         self,
         input_size: int,
@@ -109,7 +107,7 @@ class ReplicatedLinear(LinearBase, LoRAMixin):
             self.bias.weight_loader = self.weight_loader
         else:
             self.register_parameter("bias", None)
-        
+
         self.__init_lora__(r, lora_alpha, lora_dropout)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -122,7 +120,6 @@ class ReplicatedLinear(LinearBase, LoRAMixin):
 
 
 class ColumnParallelLinear(LinearBase, LoRAMixin):
-
     def __init__(
         self,
         input_size: int,
@@ -145,7 +142,7 @@ class ColumnParallelLinear(LinearBase, LoRAMixin):
             self.bias.weight_loader = self.weight_loader
         else:
             self.register_parameter("bias", None)
-        
+
         self.__init_lora__(r, lora_alpha, lora_dropout)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -162,7 +159,6 @@ class ColumnParallelLinear(LinearBase, LoRAMixin):
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):
-
     def __init__(
         self,
         input_size: int,
@@ -196,7 +192,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
 
 class QKVParallelLinear(ColumnParallelLinear):
-
     def __init__(
         self,
         hidden_size: int,
@@ -217,7 +212,15 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
         input_size = hidden_size
         output_size = (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_size
-        super().__init__(input_size, output_size, bias, r, lora_alpha, lora_dropout, quant_kind=quant_kind)
+        super().__init__(
+            input_size,
+            output_size,
+            bias,
+            r,
+            lora_alpha,
+            lora_dropout,
+            quant_kind=quant_kind,
+        )
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
         param_data = param.data
@@ -234,7 +237,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
         param_data.copy_(loaded_weight)
-        self._maybe_quantize_loaded_weight_param(param, loaded_shard_id=loaded_shard_id, expected_shard_ids={"q", "k", "v"})
+        self._maybe_quantize_loaded_weight_param(
+            param, loaded_shard_id=loaded_shard_id, expected_shard_ids={"q", "k", "v"}
+        )
 
 
 class RowParallelLinear(LinearBase, LoRAMixin):
@@ -259,7 +264,7 @@ class RowParallelLinear(LinearBase, LoRAMixin):
             self.bias.weight_loader = self.weight_loader
         else:
             self.register_parameter("bias", None)
-        
+
         self.__init_lora__(r, lora_alpha, lora_dropout)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):

@@ -9,4 +9,3 @@ updates:
       timezone: "Asia/Shanghai"
     commit-message:
       prefix: "[CI]"
-

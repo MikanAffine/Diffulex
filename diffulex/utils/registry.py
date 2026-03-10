@@ -30,5 +30,4 @@ def fetch_factory_name(factory: Any) -> str:
 
     if module and module != "builtins":
         return f"{module}.{name}"
-    return name    
-    
+    return name

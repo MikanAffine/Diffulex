@@ -16,7 +16,7 @@ from diffulex.quantization.context import (
 from diffulex.quantization.factory import QuantizationStrategyFactory
 from diffulex.quantization.config import (
     QuantizationConfig,
-    kv_cacheQuantConfig,
+    KVCacheQuantConfig,
     WeightQuantConfig,
     ActivationQuantConfig,
 )
@@ -30,8 +30,8 @@ from diffulex.quantization.strategy import (
     WeightQuantizationStrategy,
 )
 from diffulex.quantization.kv_cache_dtype import (
-    kv_cacheDType,
-    kv_cacheDTypeSpec,
+    KVCacheDType,
+    KVCacheDTypeSpec,
     parse_kv_cache_dtype,
     ensure_scale_tensor,
     view_fp8_cache,
@@ -47,7 +47,7 @@ __all__ = [
     "QuantizationStrategyFactory",
     # Config
     "QuantizationConfig",
-    "kv_cacheQuantConfig",
+    "KVCacheQuantConfig",
     "WeightQuantConfig",
     "ActivationQuantConfig",
     # Registry
@@ -55,11 +55,11 @@ __all__ = [
     "registered_kv_cache_dtypes",
     # Strategy interfaces
     "QuantizationStrategy",
-    "kv_cacheQuantizationStrategy",
+    "KVCacheQuantizationStrategy",
     "WeightQuantizationStrategy",
     # KV Cache dtype utilities
-    "kv_cacheDType",
-    "kv_cacheDTypeSpec",
+    "KVCacheDType",
+    "KVCacheDTypeSpec",
     "parse_kv_cache_dtype",
     "ensure_scale_tensor",
     "view_fp8_cache",

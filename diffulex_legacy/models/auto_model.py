@@ -14,6 +14,7 @@ class AutoModelLM:
         "dream-on": None,
         "sdar": None,
     }
+
     @classmethod
     def from_config(cls, config: Config):
         model = cls.MODEL_MAPPING[config.model_name](config.hf_config)

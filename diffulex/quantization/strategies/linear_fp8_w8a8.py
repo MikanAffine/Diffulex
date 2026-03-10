@@ -126,4 +126,3 @@ class LinearFP8W8A8Strategy(LinearQuantizationStrategy):
             input_scale=None,
             bias=bias,
         )
-

@@ -12,16 +12,19 @@ from diffulex.quantization.strategy import (
     LinearQuantizationStrategy,
 )
 
-kv_cacheStrategyBuilder = Callable[[], KVCacheQuantizationStrategy]
-_KV_CACHE_BUILDERS: Dict[str, kv_cacheStrategyBuilder] = {}
+KVCacheStrategyBuilder = Callable[[], KVCacheQuantizationStrategy]
+_KV_CACHE_BUILDERS: Dict[str, KVCacheStrategyBuilder] = {}
 
 
-def register_kv_cache_strategy(*dtype_aliases: str) -> Callable[[kv_cacheStrategyBuilder], kv_cacheStrategyBuilder]:
-    def _decorator(builder: kv_cacheStrategyBuilder) -> kv_cacheStrategyBuilder:
+def register_kv_cache_strategy(
+    *dtype_aliases: str,
+) -> Callable[[KVCacheStrategyBuilder], KVCacheStrategyBuilder]:
+    def _decorator(builder: KVCacheStrategyBuilder) -> KVCacheStrategyBuilder:
         for alias in dtype_aliases:
             key = _normalize_kv_cache_dtype(alias)
             _KV_CACHE_BUILDERS[key] = builder
         return builder
+
     return _decorator
 
 
@@ -49,18 +52,31 @@ def _normalize_linear_dtype(dtype: str) -> str:
     if s in {"__stub__", "__fallback__"}:
         return "__stub__"
     aliases = {
-        "": "bf16", "none": "bf16", "bf16": "bf16", "bfloat16": "bf16",
-        "int8": "int8", "i8": "int8", "int4": "int4", "i4": "int4",
-        "fp8": "fp8_e4m3", "fp8_e4m3": "fp8_e4m3", "e4m3": "fp8_e4m3",
-        "fp8_e5m2": "fp8_e5m2", "e5m2": "fp8_e5m2",
-        "gptq": "gptq", "gptq_marlin": "gptq_marlin", "gptq_marlin_24": "gptq_marlin_24",
-        "awq": "awq", "awq_marlin": "awq_marlin", "gptq_awq": "gptq_awq",
-        "marlin": "marlin_int8", "marlin_int8": "marlin_int8",
+        "": "bf16",
+        "none": "bf16",
+        "bf16": "bf16",
+        "bfloat16": "bf16",
+        "int8": "int8",
+        "i8": "int8",
+        "int4": "int4",
+        "i4": "int4",
+        "fp8": "fp8_e4m3",
+        "fp8_e4m3": "fp8_e4m3",
+        "e4m3": "fp8_e4m3",
+        "fp8_e5m2": "fp8_e5m2",
+        "e5m2": "fp8_e5m2",
+        "gptq": "gptq",
+        "gptq_marlin": "gptq_marlin",
+        "gptq_marlin_24": "gptq_marlin_24",
+        "awq": "awq",
+        "awq_marlin": "awq_marlin",
+        "gptq_awq": "gptq_awq",
+        "marlin": "marlin_int8",
+        "marlin_int8": "marlin_int8",
     }
     if s not in aliases:
         raise ValueError(
-            f"Unsupported linear quant dtype={dtype!r}. "
-            "Supported: bf16/int8/int4/fp8/fp8_e4m3/fp8_e5m2/gptq/awq/marlin"
+            f"Unsupported linear quant dtype={dtype!r}. Supported: bf16/int8/int4/fp8/fp8_e4m3/fp8_e5m2/gptq/awq/marlin"
         )
     return aliases[s]
 
@@ -72,9 +88,11 @@ def register_linear_strategy(
 ) -> Callable[[LinearStrategyBuilder], LinearStrategyBuilder]:
     w = _normalize_linear_dtype(weight_dtype)
     a = _normalize_linear_dtype(act_dtype)
+
     def _decorator(builder: LinearStrategyBuilder) -> LinearStrategyBuilder:
         _LINEAR_BUILDERS[(w, a)] = builder
         return builder
+
     return _decorator
 
 
@@ -101,6 +119,16 @@ def create_linear_strategy(*, weight_dtype: str, act_dtype: str) -> LinearQuanti
 
 def registered_linear_dtypes() -> list[str]:
     return [
-        "bf16", "int8", "int4", "fp8_e4m3", "fp8_e5m2",
-        "gptq", "gptq_marlin", "gptq_marlin_24", "awq", "awq_marlin", "gptq_awq", "marlin_int8",
+        "bf16",
+        "int8",
+        "int4",
+        "fp8_e4m3",
+        "fp8_e5m2",
+        "gptq",
+        "gptq_marlin",
+        "gptq_marlin_24",
+        "awq",
+        "awq_marlin",
+        "gptq_awq",
+        "marlin_int8",
     ]

@@ -16,7 +16,12 @@ from flash_attn import flash_attn_varlen_func
 
 from diffulex.attention.metadata import AttnMetaDataBase
 from diffulex_kernel.python.kv_cache_kernels import load_kv_cache
-from diffulex_kernel.python.paged_attn_decode_triton import paged_attn_decode_unified_triton
+from diffulex_kernel.python.paged_attn_decode_triton import (
+    paged_attn_decode_unified_triton,
+)
+from diffulex_kernel.python.chunked_prefill_triton import (
+    chunked_prefill_attn_unified_bf16_cache,
+)
 
 
 def dllm_flash_attn_prefill(
@@ -187,7 +192,19 @@ def dllm_flash_attn_decode(
     raise ValueError(f"Unsupported decode mode: {decode_mode!r}")
 
 
+def dllm_chunked_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    attn_metadata: AttnMetaDataBase,
+) -> torch.Tensor:
+    return chunked_prefill_attn_unified_bf16_cache(q, k, v, k_cache, v_cache, attn_metadata)
+
+
 __all__ = [
     "dllm_flash_attn_prefill",
     "dllm_flash_attn_decode",
+    "dllm_chunked_prefill",
 ]
