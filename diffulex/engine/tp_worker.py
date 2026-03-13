@@ -90,7 +90,12 @@ class DiffulexTPWorker(DiffulexTPWorkerAsyncMixin):
             sampling_params = [sampling_params] * len(prompts)
 
         req_id_to_prompt_id = {}
-        for prompt_id, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
+        for prompt_id, (prompt, sp) in tqdm(
+            enumerate(zip(prompts, sampling_params)),
+            total=len(prompts),
+            desc="Adding Requests to Scheduler",
+            dynamic_ncols=True,
+        ):
             req_id = self.add_request(prompt, sp)
             req_id_to_prompt_id[req_id] = prompt_id
 
