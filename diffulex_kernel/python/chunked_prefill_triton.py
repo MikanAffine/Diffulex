@@ -145,10 +145,19 @@ def _chunked_prefill_attn_unified_kernel(
     # Stage 2: Attention against new KV
     kv_start = q_start
     full_range = tl.cdiv(valid_kv_len, BLOCK_N)
+
+    abs_q_block = context_len + offs_q_block
+
+    max_q_idx_in_chunk = tl.minimum(valid_q_len - 1, (q_block_id + 1) * BLOCK_M - 1)
+    max_abs_q_idx = context_len + max_q_idx_in_chunk
+    max_abs_kv_idx = ((max_abs_q_idx // DLLM_BLOCK_SIZE) + 1) * DLLM_BLOCK_SIZE
+    max_rel_kv_len = max_abs_kv_idx - context_len
+
     block_causal_range = tl.minimum(
-        tl.cdiv(valid_q_len + (q_block_id + 1) * BLOCK_M, BLOCK_N),
-        tl.cdiv(valid_kv_len, BLOCK_N),
+        tl.maximum(0, tl.cdiv(max_rel_kv_len, BLOCK_N)),
+        full_range,
     )
+
     if IS_BLOCK_CAUSAL and not IS_PREFIX_FULL:
         loop_range = block_causal_range
     elif IS_BLOCK_CAUSAL and IS_PREFIX_FULL:
@@ -163,6 +172,7 @@ def _chunked_prefill_attn_unified_kernel(
     for kv_block_id in range(0, loop_range):
         kv_block_start = kv_block_id * BLOCK_N
         offs_kv_block = kv_block_start + tl.arange(0, BLOCK_N)
+        abs_kv_block = context_len + offs_kv_block
         kv_token_valid_map = (offs_kv_block < new_len) & (offs_kv_block < valid_q_len)
 
         k_offs = (
@@ -177,7 +187,7 @@ def _chunked_prefill_attn_unified_kernel(
         scores = tl.dot(q, k).to(tl.float32) * softmax_scale
         score_valid_mask = mask_q_block[:, None] & kv_token_valid_map[None, :]
         if IS_BLOCK_CAUSAL and not IS_PREFIX_FULL:
-            score_block_mask = ((offs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > offs_kv_block[
+            score_block_mask = ((abs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > abs_kv_block[
                 None, :
             ]
             score_mask = score_valid_mask & score_block_mask
@@ -187,13 +197,13 @@ def _chunked_prefill_attn_unified_kernel(
                 score_padded_causal_mask = ((offs_q_block >= prefix_len) & (offs_q_block < padded_prefix_len))[
                     :, None
                 ] & (offs_kv_block < padded_prefix_len)[None, :]
-                score_block_mask = ((offs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > offs_kv_block[
+                score_block_mask = ((abs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > abs_kv_block[
                     None, :
                 ]
                 score_block_mask_extend_only = score_block_mask & (offs_q_block >= padded_prefix_len)[:, None]
-                score_mask = score_pure_prefix_mask | score_padded_causal_mask | score_block_mask_extend_only
+                score_mask = score_valid_mask & (score_pure_prefix_mask | score_padded_causal_mask | score_block_mask_extend_only)
             else:
-                score_block_mask = ((offs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > offs_kv_block[
+                score_block_mask = ((abs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > abs_kv_block[
                     None, :
                 ]
                 score_mask = score_valid_mask & score_block_mask
@@ -219,99 +229,6 @@ def _chunked_prefill_attn_unified_kernel(
         acc += tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
         m = m_new
         l = l_new
-    
-    # # ==========================================
-    # # Stage 2: Attention against new KV
-    # # ==========================================
-    # kv_start = q_start
-    # full_range = tl.cdiv(valid_kv_len, BLOCK_N)
-    
-    # # [修复2]: 修正 causal range 优化，基于绝对索引计算真正的 Block Causal 边界
-    # max_q_idx_in_chunk = tl.minimum(valid_q_len - 1, (q_block_id + 1) * BLOCK_M - 1)
-    # max_abs_q_idx = context_len + max_q_idx_in_chunk
-    # max_abs_kv_idx = ((max_abs_q_idx // DLLM_BLOCK_SIZE) + 1) * DLLM_BLOCK_SIZE
-    # max_rel_kv_len = max_abs_kv_idx - context_len # 转换回相对于当前 chunk 的 KV 长度
-    
-    # block_causal_range = tl.minimum(
-    #     tl.maximum(0, tl.cdiv(max_rel_kv_len, BLOCK_N)), 
-    #     full_range
-    # )
-
-    # if IS_BLOCK_CAUSAL and not IS_PREFIX_FULL:
-    #     loop_range = block_causal_range
-    # elif IS_BLOCK_CAUSAL and IS_PREFIX_FULL:
-    #     is_prefilling = status == 0
-    #     if is_prefilling:
-    #         loop_range = full_range
-    #     else:
-    #         loop_range = block_causal_range
-    # else:
-    #     loop_range = full_range
-
-    # # [修复1]: 计算当前 Query Block 的全局绝对索引
-    # abs_q_block = context_len + offs_q_block
-
-    # for kv_block_id in range(0, loop_range):
-    #     kv_block_start = kv_block_id * BLOCK_N
-    #     offs_kv_block = kv_block_start + tl.arange(0, BLOCK_N)
-        
-    #     # [修复1]: 计算当前 KV Block 的全局绝对索引
-    #     abs_kv_block = context_len + offs_kv_block
-        
-    #     kv_token_valid_map = (offs_kv_block < new_len) & (offs_kv_block < valid_q_len)
-
-    #     k_offs = (
-    #         (kv_start + offs_kv_block[None, :]) * kv_stride_s + kv_head_id * kv_stride_h + offs_d[:, None] * kv_stride_d
-    #     )
-    #     k = tl.load(
-    #         k_ptr + k_offs,
-    #         mask=kv_token_valid_map[None, :] & mask_d[:, None],
-    #         other=0.0,
-    #     ).to(tl.bfloat16)
-
-    #     scores = tl.dot(q, k).to(tl.float32) * softmax_scale
-    #     score_valid_mask = mask_q_block[:, None] & kv_token_valid_map[None, :]
-        
-    #     # [修复1]: Mask 计算全面切换为绝对索引 (abs_q_block 和 abs_kv_block)
-    #     if IS_BLOCK_CAUSAL and not IS_PREFIX_FULL:
-    #         score_block_mask = ((abs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > abs_kv_block[None, :]
-    #         score_mask = score_valid_mask & score_block_mask
-            
-    #     elif IS_BLOCK_CAUSAL and IS_PREFIX_FULL:
-    #         if is_prefilling:
-    #             score_pure_prefix_mask = (abs_q_block < prefix_len)[:, None] & (abs_kv_block < prefix_len)[None, :]
-    #             score_padded_causal_mask = ((abs_q_block >= prefix_len) & (abs_q_block < padded_prefix_len))[:, None] & (abs_kv_block < padded_prefix_len)[None, :]
-    #             score_block_mask = ((abs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > abs_kv_block[None, :]
-    #             score_block_mask_extend_only = score_block_mask & (abs_q_block >= padded_prefix_len)[:, None]
-                
-    #             # [修复3]: 这里的合并要记得带上 score_valid_mask 以免访问当前 chunk 外的垃圾数据
-    #             score_mask = score_valid_mask & (score_pure_prefix_mask | score_padded_causal_mask | score_block_mask_extend_only)
-    #         else:
-    #             score_block_mask = ((abs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > abs_kv_block[None, :]
-    #             score_mask = score_valid_mask & score_block_mask
-    #     else:
-    #         score_mask = score_valid_mask
-            
-    #     scores = tl.where(score_mask, scores, float("-inf"))
-
-    #     m_new = tl.maximum(m, tl.max(scores, axis=1))
-    #     p = tl.exp(scores - m_new[:, None])
-    #     l_new = l * tl.exp(m - m_new) + tl.sum(p, axis=1)
-    #     alpha = tl.exp(m - m_new)
-    #     acc *= alpha[:, None]
-
-    #     v_offs = (
-    #         (kv_start + offs_kv_block[:, None]) * kv_stride_s + kv_head_id * kv_stride_h + offs_d[None, :] * kv_stride_d
-    #     )
-    #     v = tl.load(
-    #         v_ptr + v_offs,
-    #         mask=kv_token_valid_map[:, None] & mask_d[None, :],
-    #         other=0.0,
-    #     ).to(tl.bfloat16)
-
-    #     acc += tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
-    #     m = m_new
-    #     l = l_new
 
     out = acc / l[:, None]
     o_offs = (q_start + offs_q_block[:, None]) * o_stride_s + head_id * o_stride_h + offs_d[None, :] * o_stride_d
