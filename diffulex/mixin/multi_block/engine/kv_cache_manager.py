@@ -8,8 +8,12 @@ if TYPE_CHECKING:
 
 
 class MultiBlockKVCacheManagerMixin:
+    def _missing_cache_pages_multi_block(self: KVCacheManagerBase, req: DllmReq) -> int:
+        total_cache_pages = req.num_pages_with_seq_len(req.cache_len)
+        return max(0, total_cache_pages - len(req.page_table))
+
     def can_append_multi_block(self: KVCacheManagerBase, req: DllmReq) -> bool:
-        return len(self.free_page_ids) * self.page_size >= min(req.to_cache_len, req.chunk_size)
+        return len(self.free_page_ids) >= self._missing_cache_pages_multi_block(req)
 
     def _finalize_last_unhashed_page_multi_block(self: KVCacheManagerBase, req: DllmReq) -> None:
         page_table = req.page_table
@@ -35,10 +39,17 @@ class MultiBlockKVCacheManagerMixin:
             return
 
         page_table = req.page_table
-        allocate_num_pages = req.to_cache_len // self.page_size
-        for _ in range(allocate_num_pages):
-            if req.cache_len // self.page_size >= len(req.page_table):
-                self._finalize_last_unhashed_page_multi_block(req)
-                page_id = self.free_page_ids[0]
-                self._allocate_page(page_id)
-                page_table.append(page_id)
+        missing_pages = self._missing_cache_pages_multi_block(req)
+        if missing_pages > len(self.free_page_ids):
+            raise RuntimeError(
+                "Insufficient free KV cache pages for may_append_multi_block: "
+                f"missing_pages={missing_pages}, free_pages={len(self.free_page_ids)}, "
+                f"cache_len={req.cache_len}, to_cache_len={req.to_cache_len}, "
+                f"page_table_len={len(page_table)}, req_id={getattr(req, 'req_id', '?')}"
+            )
+
+        for _ in range(missing_pages):
+            self._finalize_last_unhashed_page_multi_block(req)
+            page_id = self.free_page_ids[0]
+            self._allocate_page(page_id)
+            page_table.append(page_id)

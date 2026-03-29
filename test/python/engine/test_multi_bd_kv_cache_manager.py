@@ -16,6 +16,9 @@ class FakeReq:
     def num_pages(self) -> int:
         return len(self._pages)
 
+    def num_pages_with_seq_len(self, seq_len: int) -> int:
+        return (seq_len + len(self._pages[0]) - 1) // len(self._pages[0])
+
     def page(self, index: int) -> list[int]:
         return list(self._pages[index])
 
@@ -89,6 +92,36 @@ def test_may_append_uses_last_page_table_entry_when_finalizing_previous_append()
     assert page3.token_ids == req.page(3)
     assert manager.hash_to_page_id[expected_h3] == 3
     assert page4.hash == -1
+
+
+def test_may_append_does_not_allocate_extra_page_when_cache_already_fully_covered() -> None:
+    pages = [
+        [1000 + i for i in range(32)],
+        [2000 + i for i in range(32)],
+    ]
+    req = FakeReq(pages, cache_len=64, to_cache_len=32)
+    manager = _build_manager()
+    manager.free_page_ids.clear()
+
+    manager.may_append(req)
+
+    assert req.page_table == [0, 1]
+
+
+def test_can_append_uses_missing_pages_not_token_bytes() -> None:
+    pages = [
+        [1000 + i for i in range(32)],
+        [2000 + i for i in range(32)],
+        [3000 + i for i in range(32)],
+    ]
+    req = FakeReq(pages, cache_len=96, to_cache_len=32)
+    manager = _build_manager()
+    manager.free_page_ids.clear()
+
+    assert manager.can_append(req) is False
+
+    manager.free_page_ids.append(5)
+    assert manager.can_append(req) is True
 
 
 def test_apply_cached_prefix_pages_marks_prefix_blocks_in_cache() -> None:

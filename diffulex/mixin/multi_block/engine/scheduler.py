@@ -34,6 +34,10 @@ class SchedulerMultiBlockMixin:
             self.kv_cache_manager.allocate(req)
             req.apply_cached_prefix_pages()
             if req.is_preempted:
+                if not self.kv_cache_manager.can_append(req):
+                    self.kv_cache_manager.free(req)
+                    num_reqs -= 1
+                    break
                 self.kv_cache_manager.may_append(req)
 
             num_batched_tokens += projected - req.num_cached_tokens

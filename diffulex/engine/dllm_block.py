@@ -10,6 +10,11 @@ from dataclasses import dataclass, field
 from diffulex.config import DecodingThresholds
 from diffulex.engine.status import DllmBlockStatus, DllmBlockType
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from diffulex.engine.request import DllmReq
+    from diffulex.engine.dllm_block import DllmBlockBuffer
 
 weakref_fn = lambda x: weakref.ref(x) if x is not None else None
 
@@ -71,6 +76,10 @@ class DllmBlock:
         ref = getattr(self, "_dllm_block_buffer", None)
         return ref() if ref else None
 
+    @property
+    def rel_page_id(self) -> int:
+        return self.start // self.req.page_size
+    
     @property
     def token_ids(self) -> list[int]:
         return self.req[self.start : self.end]

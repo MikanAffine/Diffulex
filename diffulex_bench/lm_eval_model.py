@@ -17,6 +17,7 @@ from lm_eval.api.registry import register_model
 from diffulex import SamplingParams
 from diffulex.utils.output import decode_token_ids_robust
 from diffulex_bench.runner import BenchmarkRunner
+from diffulex_bench.config import decode_model_arg_value, extract_diffulex_engine_kwargs
 from diffulex.logger import get_logger
 
 T = TypeVar("T", bound="LM")
@@ -142,32 +143,17 @@ class DiffulexLM(LM):
         self.all_nfe = []
         self.all_tokens = []
 
+        engine_sources = locals().copy()
+        extra_engine_kwargs = engine_sources.pop("kwargs")
+        engine_sources.pop("self", None)
+        engine_sources.update(extra_engine_kwargs)
+
         # Initialize Diffulex runner
         self.runner = BenchmarkRunner(
             model_path=pretrained,
             tokenizer_path=pretrained,
             wait_ready=wait_ready,
-            model_name=model_name,
-            decoding_strategy=decoding_strategy,
-            mask_token_id=mask_token_id,
-            tensor_parallel_size=tensor_parallel_size,
-            data_parallel_size=data_parallel_size,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_num_reqs=max_num_reqs,
-            use_lora=use_lora,
-            lora_path=lora_path if use_lora else "",
-            pre_merge_lora=pre_merge_lora,
-            enforce_eager=enforce_eager,
-            kv_cache_layout=kv_cache_layout,
-            decoding_thresholds=decoding_thresholds,
-            add_block_threshold=add_block_threshold,
-            semi_complete_threshold=semi_complete_threshold,
-            decoding_threshold=decoding_threshold,
-            block_size=block_size,
-            buffer_size=buffer_size,
-            multi_block_prefix_full=multi_block_prefix_full,
+            **extract_diffulex_engine_kwargs(engine_sources),
         )
 
         self.tokenizer = self.runner.tokenizer
@@ -224,8 +210,30 @@ class DiffulexLM(LM):
             Instance of the LM class
         """
         additional_config = {} if additional_config is None else additional_config
-        args = utils.simple_parse_args_string(arg_string)
-        args2 = {k: v for k, v in additional_config.items() if v is not None}
+        args = {
+            k: decode_model_arg_value(v)
+            for k, v in utils.simple_parse_args_string(arg_string).items()
+        }
+        args2 = {
+            k: decode_model_arg_value(v)
+            for k, v in additional_config.items()
+            if v is not None
+        }
+        return cls(**args, **args2)
+
+    @classmethod
+    def create_from_arg_obj(cls: Type[T], arg_dict: dict, additional_config: Optional[dict] = None) -> T:
+        """Mirror lm-eval's dict-based init path while decoding encoded complex values."""
+        additional_config = {} if additional_config is None else additional_config
+        args = {
+            k: decode_model_arg_value(v)
+            for k, v in arg_dict.items()
+        }
+        args2 = {
+            k: decode_model_arg_value(v)
+            for k, v in additional_config.items()
+            if v is not None
+        }
         return cls(**args, **args2)
 
     def apply_chat_template(self, chat_history, add_generation_prompt: bool = True) -> str:

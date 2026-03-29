@@ -132,15 +132,14 @@ class DllmReqMultiBlockMixin:
     @property
     def running_sequence(self) -> list[int]:
         if self.is_prefilling:
-            prefilling_len = self.running_len
-            return self.token_ids[:prefilling_len]
+            return self.token_ids[self.in_cache_len:self.running_len]
         elif self.is_decoding or self.is_completed:
             return self.dllm_block_buffer.buffer_sequence
 
     @property
     def running_position_ids(self) -> list[int]:
         if self.is_prefilling:
-            return range(self.in_cache_len, len(self))
+            return range(self.in_cache_len, self.running_len)
         elif self.is_decoding or self.is_completed:
             return self.dllm_block_buffer.buffer_position_ids
 

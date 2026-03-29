@@ -9,6 +9,29 @@ from diffulex_kernel.python.auto_tuner import build_chunked_prefill_configs
 DISABLE_CHUNKED_PREFILL_AUTOTUNE = os.environ.get("DIFFULEX_DISABLE_CHUNKED_PREFILL_AUTOTUNE", "0") == "1"
 
 
+def _prune_chunked_prefill_configs(configs, _nargs, **kwargs):
+    """Keep autotune numerically stable across page sizes for small decode blocks.
+
+    For small DLLM blocks, varying the cache-stage tile shape changes the softmax
+    reduction order enough to flip greedy decoding across page sizes. Constrain
+    those cases to the stable launch shape; keep the full search space for larger
+    blocks where we haven't observed correctness regressions.
+    """
+    dllm_block_size = kwargs.get("DLLM_BLOCK_SIZE")
+    if dllm_block_size is None or dllm_block_size > 16:
+        return configs
+
+    stable_configs = [
+        config
+        for config in configs
+        if config.kwargs.get("BLOCK_M") == 64
+        and config.kwargs.get("BLOCK_N") == 64
+        and config.num_warps == 4
+        and config.num_stages == 2
+    ]
+    return stable_configs or configs
+
+
 def maybe_autotune(fn):
     fn = triton.jit(fn)
     # NOTE: Tests pass explicit BLOCK_M / BLOCK_N meta-parameters, which conflicts with
@@ -20,7 +43,15 @@ def maybe_autotune(fn):
             triton.Config(c, num_warps=c.pop("num_warps"), num_stages=c.pop("num_stages"))
             for c in build_chunked_prefill_configs()
         ],
-        key=["NUM_GROUPS", "HEAD_DIM", "IS_BLOCK_CAUSAL", "IS_PREFIX_FULL"],
+        key=[
+            "NUM_GROUPS",
+            "HEAD_DIM",
+            "PAGE_SIZE",
+            "DLLM_BLOCK_SIZE",
+            "IS_BLOCK_CAUSAL",
+            "IS_PREFIX_FULL",
+        ],
+        prune_configs_by={"early_config_prune": _prune_chunked_prefill_configs},
     )(fn)
 
 @maybe_autotune
@@ -104,19 +135,22 @@ def _chunked_prefill_attn_unified_kernel(
     acc = tl.zeros([BLOCK_M, HEAD_DIM_PADDED], dtype=tl.float32)
 
     # Stage 1: Attention against KV Cache
-    offs_kv_cache_block = tl.arange(0, BLOCK_N)
-    mask_kv_cache_block = offs_kv_cache_block < PAGE_SIZE
-    num_pages = (context_len + PAGE_SIZE - 1) // PAGE_SIZE
-    for page_rel_id in range(0, num_pages):
-        page_abs_id = tl.load(
-            page_tables_ptr + req_id * page_tables_stride_nreqs + page_rel_id * page_tables_stride_pages
+    full_cache_range = tl.cdiv(context_len, BLOCK_N)
+    for cache_block_id in range(0, full_cache_range):
+        offs_kv_cache_block = cache_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
+        kv_cache_valid_map = offs_kv_cache_block < context_len
+        page_rel_ids = offs_kv_cache_block // PAGE_SIZE
+        page_abs_ids = tl.load(
+            page_tables_ptr + req_id * page_tables_stride_nreqs + page_rel_ids * page_tables_stride_pages,
+            mask=kv_cache_valid_map,
+            other=-1,
         ).to(tl.int32)
-        page_token_ids = offs_kv_cache_block + page_rel_id * PAGE_SIZE
-        page_token_valid_map = (page_abs_id >= 0) & (page_token_ids < context_len) & mask_kv_cache_block
+        page_offs = offs_kv_cache_block % PAGE_SIZE
+        page_token_valid_map = kv_cache_valid_map & (page_abs_ids >= 0)
 
         k_offs = (
-            page_abs_id * k_cache_stride_npages
-            + offs_kv_cache_block[:, None] * k_cache_stride_psz
+            page_abs_ids[:, None] * k_cache_stride_npages
+            + page_offs[:, None] * k_cache_stride_psz
             + kv_head_id * k_cache_stride_h
             + offs_d[None, :] * k_cache_stride_d
         )
@@ -136,8 +170,8 @@ def _chunked_prefill_attn_unified_kernel(
         acc *= alpha[:, None]
 
         v_offs = (
-            page_abs_id * v_cache_stride_npages
-            + offs_kv_cache_block[:, None] * v_cache_stride_psz
+            page_abs_ids[:, None] * v_cache_stride_npages
+            + page_offs[:, None] * v_cache_stride_psz
             + kv_head_id * v_cache_stride_h
             + offs_d[None, :] * v_cache_stride_d
         )
@@ -145,9 +179,9 @@ def _chunked_prefill_attn_unified_kernel(
             v_cache_ptr + v_offs,
             mask=page_token_valid_map[:, None] & mask_d[None, :],
             other=0.0,
-        ).to(tl.bfloat16)
+        ).to(tl.float32)
 
-        acc += tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
+        acc += tl.dot(p, v).to(tl.float32)
         m = m_new
         l = l_new
 
@@ -233,9 +267,9 @@ def _chunked_prefill_attn_unified_kernel(
             v_ptr + v_offs,
             mask=kv_token_valid_map[:, None] & mask_d[None, :],
             other=0.0,
-        ).to(tl.bfloat16)
+        ).to(tl.float32)
 
-        acc += tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
+        acc += tl.dot(p, v).to(tl.float32)
         m = m_new
         l = l_new
 

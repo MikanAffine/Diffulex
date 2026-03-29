@@ -56,12 +56,41 @@ class Config:
     kv_cache_layout: str = "unified"  # "unified" or "distinct"
 
     def __post_init__(self):
-        assert os.path.isdir(self.model)
-        assert self.page_size % 16 == 0
-        assert 1 <= self.tensor_parallel_size <= 8
-        assert 1 <= self.data_parallel_size <= 1024
-        assert isinstance(self.master_port, int) and 0 < self.master_port < 65536
-        assert isinstance(self.device_start, int) and self.device_start >= 0
+        if not os.path.isdir(self.model):
+            raise ValueError(f"model must be an existing directory, got: {self.model}")
+
+        if self.page_size % 4 != 0:
+            raise ValueError(f"page_size must be divisible by 4, got: {self.page_size}")
+        
+        if self.block_size % 4 != 0:
+            raise ValueError(f"block_size must be divisible by 4, got: {self.block_size}")
+        
+        if self.page_size < self.block_size:
+            raise ValueError(f"page_size must be >= block_size, got: page_size={self.page_size}, block_size={self.block_size}")
+
+        if not 1 <= self.tensor_parallel_size <= 8:
+            raise ValueError(
+                "tensor_parallel_size must be in [1, 8], "
+                f"got: {self.tensor_parallel_size}"
+            )
+
+        if not 1 <= self.data_parallel_size <= 1024:
+            raise ValueError(
+                "data_parallel_size must be in [1, 1024], "
+                f"got: {self.data_parallel_size}"
+            )
+
+        if not (isinstance(self.master_port, int) and 0 < self.master_port < 65536):
+            raise ValueError(
+                "master_port must be an int in (0, 65536), "
+                f"got: {self.master_port}"
+            )
+            
+        if not (isinstance(self.device_start, int) and self.device_start >= 0):
+            raise ValueError(
+                "device_start must be a non-negative int, "
+                f"got: {self.device_start}"
+            )
 
         # LoRA validation
         if self.use_lora:
@@ -78,7 +107,13 @@ class Config:
             else self.hf_config.max_sequence_length
         )
         self.max_model_len = min(self.max_model_len, cfg_max_model_len)
-        assert self.max_num_batched_tokens >= self.max_model_len
+        
+        if self.max_num_batched_tokens < self.max_model_len:
+            raise ValueError(
+                "max_num_batched_tokens must be >= max_model_len after HF config clamp, "
+                f"got max_num_batched_tokens={self.max_num_batched_tokens}, "
+                f"max_model_len={self.max_model_len}"
+            )
 
         if not self.device_ids:
             import torch

@@ -9,7 +9,14 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from diffulex_bench.config import BenchmarkConfig, EngineConfig, EvalConfig
+from diffulex_bench.config import (
+    BenchmarkConfig,
+    EngineConfig,
+    EvalConfig,
+    decode_model_arg_value,
+    encode_model_arg_value,
+    parse_engine_arg_override,
+)
 from diffulex.logger import setup_logger, get_logger
 from diffulex_bench.arg_parser import create_argument_parser, get_default_config_path
 
@@ -17,6 +24,69 @@ try:
     from lm_eval.__main__ import cli_evaluate
 except ImportError:
     cli_evaluate = None
+
+
+def _decode_lm_eval_model_arg_dict(args_dict: dict) -> dict:
+    return {k: decode_model_arg_value(v) for k, v in args_dict.items()}
+
+
+def _install_lm_eval_model_arg_decoder():
+    """Patch lm-eval CLI parsing so encoded complex model_args are decoded before logging/init."""
+    import lm_eval._cli.utils as lm_eval_cli_utils
+    import lm_eval.config.evaluate_config as lm_eval_config
+    import lm_eval.evaluator as lm_eval_evaluator
+    import lm_eval.utils as lm_eval_utils
+
+    original = getattr(lm_eval_utils, "_diffulex_orig_simple_parse_args_string", None)
+    if original is None:
+        original = lm_eval_utils.simple_parse_args_string
+        lm_eval_utils._diffulex_orig_simple_parse_args_string = original
+
+    def decoded_parse(args_string: str | None) -> dict:
+        return _decode_lm_eval_model_arg_dict(original(args_string))
+
+    lm_eval_utils.simple_parse_args_string = decoded_parse
+    lm_eval_evaluator.simple_parse_args_string = decoded_parse
+    lm_eval_config.simple_parse_args_string = decoded_parse
+
+    original_key_val_to_dict = getattr(lm_eval_cli_utils, "_diffulex_orig_key_val_to_dict", None)
+    if original_key_val_to_dict is None:
+        original_key_val_to_dict = lm_eval_cli_utils.key_val_to_dict
+        lm_eval_cli_utils._diffulex_orig_key_val_to_dict = original_key_val_to_dict
+
+    def decoded_key_val_to_dict(args: str) -> dict:
+        return _decode_lm_eval_model_arg_dict(original_key_val_to_dict(args))
+
+    original_try_parse_json = getattr(lm_eval_cli_utils, "_diffulex_orig_try_parse_json", None)
+    if original_try_parse_json is None:
+        original_try_parse_json = lm_eval_cli_utils.try_parse_json
+        lm_eval_cli_utils._diffulex_orig_try_parse_json = original_try_parse_json
+
+    def decoded_try_parse_json(value):
+        result = original_try_parse_json(value)
+        if isinstance(result, dict):
+            return _decode_lm_eval_model_arg_dict(result)
+        return result
+
+    lm_eval_cli_utils.key_val_to_dict = decoded_key_val_to_dict
+    lm_eval_cli_utils.try_parse_json = decoded_try_parse_json
+
+    evaluator_config_cls = lm_eval_config.EvaluatorConfig
+    original_parse_dict_args = getattr(evaluator_config_cls, "_diffulex_orig_parse_dict_args", None)
+    if original_parse_dict_args is None:
+        original_parse_dict_args = evaluator_config_cls._parse_dict_args
+        evaluator_config_cls._diffulex_orig_parse_dict_args = original_parse_dict_args
+
+    def decoded_parse_dict_args(self):
+        parsed = original_parse_dict_args(self)
+        if getattr(parsed, "model_args", None) is not None:
+            parsed.model_args = _decode_lm_eval_model_arg_dict(parsed.model_args)
+        if getattr(parsed, "metadata", None) is not None:
+            parsed.metadata = _decode_lm_eval_model_arg_dict(parsed.metadata)
+        return parsed
+
+    evaluator_config_cls._parse_dict_args = decoded_parse_dict_args
+    return decoded_parse
 
 
 def config_to_model_args(config: BenchmarkConfig, *, result_output_dir: Optional[str] = None) -> str:
@@ -34,42 +104,17 @@ def config_to_model_args(config: BenchmarkConfig, *, result_output_dir: Optional
     eval_config = config.eval
     save_dir = result_output_dir if result_output_dir is not None else eval_config.output_dir
 
+    args_dict = {"pretrained": engine.model_path}
+    args_dict.update(engine.get_diffulex_kwargs())
     args_dict = {
-        "pretrained": engine.model_path,
-        "model_name": engine.model_name,
-        "decoding_strategy": engine.decoding_strategy,
-        "mask_token_id": engine.mask_token_id,
-        "tensor_parallel_size": engine.tensor_parallel_size,
-        "data_parallel_size": engine.data_parallel_size,
-        "gpu_memory_utilization": engine.gpu_memory_utilization,
-        "max_model_len": engine.max_model_len,
-        "max_num_batched_tokens": engine.max_num_batched_tokens,
-        "max_num_reqs": engine.max_num_reqs,
+        **args_dict,
         "temperature": eval_config.temperature,
         "max_new_tokens": eval_config.max_tokens,
-        "use_lora": engine.use_lora,
-        "pre_merge_lora": engine.pre_merge_lora,
-        "enforce_eager": engine.enforce_eager,
-        "kv_cache_layout": engine.kv_cache_layout,
-        "block_size": engine.block_size,
-        "buffer_size": engine.buffer_size,
-        "multi_block_prefix_full": engine.multi_block_prefix_full,
         "wait_ready": True,
     }
-    dt = engine.decoding_thresholds or {
-        "add_block_threshold": 0.1,
-        "semi_complete_threshold": 0.9,
-        "decoding_threshold": 0.9,
-    }
-    args_dict["add_block_threshold"] = dt["add_block_threshold"]
-    args_dict["semi_complete_threshold"] = dt["semi_complete_threshold"]
-    args_dict["decoding_threshold"] = dt["decoding_threshold"]
 
     if engine.tokenizer_path:
         args_dict["tokenizer_path"] = engine.tokenizer_path
-
-    if engine.use_lora and engine.lora_path:
-        args_dict["lora_path"] = engine.lora_path
 
     if save_dir and eval_config.save_results:
         args_dict["save_dir"] = save_dir
@@ -78,7 +123,11 @@ def config_to_model_args(config: BenchmarkConfig, *, result_output_dir: Optional
         args_dict["add_bos_token"] = eval_config.add_bos_token
 
     # Convert to string format: key1=value1,key2=value2
-    args_list = [f"{k}={v}" for k, v in args_dict.items()]
+    args_list = []
+    for k, v in args_dict.items():
+        if v is None:
+            continue
+        args_list.append(f"{k}={encode_model_arg_value(v)}")
     return ",".join(args_list)
 
 
@@ -131,6 +180,7 @@ def run_benchmark(config: BenchmarkConfig) -> None:
     if cli_evaluate is None:
         logger.error("lm-evaluation-harness is not installed. Please install it with: pip install lm-eval")
         sys.exit(1)
+    decoded_model_arg_parser = _install_lm_eval_model_arg_decoder()
 
     benchmark_info = [
         "=" * 80,
@@ -149,6 +199,7 @@ def run_benchmark(config: BenchmarkConfig) -> None:
 
     # Convert config to lm_eval arguments (stats + trajectory share run_output_dir with lm-eval)
     model_args = config_to_model_args(config, result_output_dir=run_output_dir)
+    decoded_model_args = decoded_model_arg_parser(model_args)
     tasks = config.eval.dataset_name
 
     # Prepare sys.argv for lm_eval
@@ -186,7 +237,7 @@ def run_benchmark(config: BenchmarkConfig) -> None:
         "=" * 80,
         "Starting lm-evaluation-harness evaluation...",
         "=" * 80,
-        f"Model args: {model_args}",
+        f"Model args: {decoded_model_args}",
         f"Tasks: {tasks}",
         "=" * 80,
     ]
@@ -223,6 +274,19 @@ def load_config_from_args(args) -> BenchmarkConfig:
     max_num_reqs = (
         args.max_num_reqs if getattr(args, "max_num_reqs", None) is not None else getattr(args, "max_num_seqs", None)
     )
+    engine_override_args = getattr(args, "engine_args", None) or []
+
+    def apply_engine_arg_overrides(engine: EngineConfig) -> None:
+        for raw in engine_override_args:
+            if "=" not in raw:
+                logger.error(f"Invalid --engine-arg '{raw}'. Expected KEY=VALUE.")
+                sys.exit(1)
+            key, raw_value = raw.split("=", 1)
+            key = key.strip()
+            if not key:
+                logger.error(f"Invalid --engine-arg '{raw}'. Empty key.")
+                sys.exit(1)
+            engine.apply_updates({key: parse_engine_arg_override(raw_value)})
 
     # Try to load from config file
     if args.config:
@@ -283,6 +347,7 @@ def load_config_from_args(args) -> BenchmarkConfig:
             config.engine.block_size = args.block_size
         if getattr(args, "multi_block_prefix_full", None) is not None:
             config.engine.multi_block_prefix_full = bool(args.multi_block_prefix_full)
+        apply_engine_arg_overrides(config.engine)
     else:
         if not args.model_path:
             logger.error("Either --config or --model-path must be provided")
@@ -337,6 +402,7 @@ def load_config_from_args(args) -> BenchmarkConfig:
             include_path=getattr(args, "include_path", None),
         )
 
+        apply_engine_arg_overrides(engine)
         config = BenchmarkConfig(engine=engine, eval=eval_config)
 
     return config

@@ -17,7 +17,7 @@ from diffulex.mixin.request_state import ReqStateMixin
 class DllmReq(DllmReqMultiBlockMixin, ReqStateMixin):
     """Minimal base class that tracks prompt tokens and cache bookkeeping."""
 
-    page_size = 256
+    page_size = 32
     counter = count()
 
     def __init__(self, token_ids: list[int], sampling_params: SamplingParams = SamplingParams()):

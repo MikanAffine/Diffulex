@@ -2,10 +2,97 @@
 Benchmark Configuration - Configuration management with separated engine and eval configs
 """
 
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from __future__ import annotations
+
+import base64
 import json
+
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any
 import yaml
+
+from diffulex.config import Config as DiffulexConfig
+
+
+MODEL_ARG_COMPLEX_PREFIX = "b64json:"
+DEFAULT_DECODING_THRESHOLDS = {
+    "add_block_threshold": 0.1,
+    "semi_complete_threshold": 0.9,
+    "decoding_threshold": 0.9,
+}
+FLAT_THRESHOLD_KEYS = (
+    "add_block_threshold",
+    "semi_complete_threshold",
+    "decoding_threshold",
+)
+
+
+def diffulex_core_engine_fields() -> set[str]:
+    """Diffulex Config fields that can be forwarded from benchmark config."""
+    return {
+        name
+        for name in DiffulexConfig.__dataclass_fields__.keys()
+        if name not in {"model", "hf_config"}
+    }
+
+
+CORE_ENGINE_FIELDS = diffulex_core_engine_fields()
+
+
+def normalize_engine_input_dict(config_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply compatibility aliases for engine config input."""
+    d = dict(config_dict)
+    if "block_size" not in d and "diffusion_block_size" in d:
+        d["block_size"] = d.pop("diffusion_block_size")
+    return d
+
+
+def encode_model_arg_value(value: Any) -> Any:
+    """Encode complex values so lm-eval model_args can round-trip them safely."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if "," not in value and not value.startswith(MODEL_ARG_COMPLEX_PREFIX):
+            return value
+        payload = json.dumps(value, ensure_ascii=False)
+    else:
+        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    token = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+    return f"{MODEL_ARG_COMPLEX_PREFIX}{token}"
+
+
+def decode_model_arg_value(value: Any) -> Any:
+    """Decode values produced by encode_model_arg_value()."""
+    if not isinstance(value, str) or not value.startswith(MODEL_ARG_COMPLEX_PREFIX):
+        return value
+    payload = value[len(MODEL_ARG_COMPLEX_PREFIX) :]
+    raw = base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8")
+    return json.loads(raw)
+
+
+def parse_engine_arg_override(value: str) -> Any:
+    """Parse CLI --engine-arg values using YAML scalar/list/dict semantics."""
+    return yaml.safe_load(value)
+
+
+def extract_diffulex_engine_kwargs(source: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only Diffulex Config kwargs and normalize defaults/aliases."""
+    normalized = normalize_engine_input_dict(source)
+    kwargs = {k: v for k, v in normalized.items() if k in CORE_ENGINE_FIELDS and v is not None}
+
+    strategy = kwargs.get("decoding_strategy")
+    if strategy in ("multi_block_diffusion", "block_diffusion", "fast_dllm"):
+        kwargs["decoding_strategy"] = "multi_bd"
+
+    if not kwargs.get("use_lora", False):
+        kwargs["lora_path"] = ""
+
+    if kwargs.get("decoding_thresholds") is None and not any(kwargs.get(k) is not None for k in FLAT_THRESHOLD_KEYS):
+        kwargs["decoding_thresholds"] = dict(DEFAULT_DECODING_THRESHOLDS)
+
+    return kwargs
 
 
 @dataclass
@@ -47,55 +134,57 @@ class EngineConfig:
     block_size: int = 32  # Aligned with diffulex.config.Config.block_size
     buffer_size: int = 4
     multi_block_prefix_full: bool = True
+    extra_engine_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def explicit_field_names(cls) -> set[str]:
+        return {
+            f.name
+            for f in cls.__dataclass_fields__.values()
+            if f.init and f.name != "extra_engine_kwargs"
+        }
+
+    @classmethod
+    def accepted_input_fields(cls) -> set[str]:
+        return cls.explicit_field_names() | CORE_ENGINE_FIELDS | {"diffusion_block_size"}
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "EngineConfig":
-        """Create engine configuration from dictionary (maps diffusion_block_size -> block_size for backward compat)"""
-        d = dict(config_dict)
-        if "block_size" not in d and "diffusion_block_size" in d:
-            d["block_size"] = d.pop("diffusion_block_size")
-        valid = {f.name for f in cls.__dataclass_fields__.values()}
+        """Create engine configuration from dictionary while preserving extra core config fields."""
+        d = normalize_engine_input_dict(config_dict)
+        valid = cls.explicit_field_names()
         filtered = {k: v for k, v in d.items() if k in valid}
-        return cls(**filtered)
+        engine = cls(**filtered)
+        engine.extra_engine_kwargs = {
+            k: v
+            for k, v in d.items()
+            if k not in valid and k in CORE_ENGINE_FIELDS
+        }
+        return engine
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
-        return {field.name: getattr(self, field.name) for field in self.__dataclass_fields__.values()}
+        data = {
+            field.name: getattr(self, field.name)
+            for field in self.__dataclass_fields__.values()
+            if field.name != "extra_engine_kwargs"
+        }
+        data.update(self.extra_engine_kwargs)
+        return data
+
+    def apply_updates(self, updates: Dict[str, Any]) -> None:
+        """Apply engine updates, preserving unknown-but-core fields for future configs."""
+        normalized = normalize_engine_input_dict(updates)
+        valid = self.explicit_field_names()
+        for key, value in normalized.items():
+            if key in valid:
+                setattr(self, key, value)
+            elif key in CORE_ENGINE_FIELDS:
+                self.extra_engine_kwargs[key] = value
 
     def get_diffulex_kwargs(self) -> Dict[str, Any]:
-        """Get arguments to pass to Diffulex engine (aligned with diffulex.config.Config)"""
-        # Normalize decoding_strategy: multi_block_diffusion -> multi_bd for backward compat
-        strategy = self.decoding_strategy
-        if strategy in ("multi_block_diffusion", "block_diffusion", "fast_dllm"):
-            strategy = "multi_bd"
-
-        kwargs = {
-            "model_name": self.model_name,
-            "decoding_strategy": strategy,
-            "mask_token_id": self.mask_token_id,
-            "tensor_parallel_size": self.tensor_parallel_size,
-            "data_parallel_size": self.data_parallel_size,
-            "gpu_memory_utilization": self.gpu_memory_utilization,
-            "max_model_len": self.max_model_len,
-            "max_num_batched_tokens": self.max_num_batched_tokens,
-            "max_num_reqs": self.max_num_reqs,
-            "use_lora": self.use_lora,
-            "lora_path": self.lora_path if self.use_lora else "",
-            "pre_merge_lora": self.pre_merge_lora,
-            "enforce_eager": self.enforce_eager,
-            "kv_cache_layout": self.kv_cache_layout,
-            "block_size": self.block_size,
-            "buffer_size": self.buffer_size,
-            "multi_block_prefix_full": self.multi_block_prefix_full,
-        }
-        dt = self.decoding_thresholds or {
-            "add_block_threshold": 0.1,
-            "semi_complete_threshold": 0.9,
-            "decoding_threshold": 0.9,
-        }
-        kwargs["decoding_thresholds"] = dt
-
-        return kwargs
+        """Get arguments to pass to Diffulex engine (aligned with diffulex.config.Config)."""
+        return extract_diffulex_engine_kwargs(self.to_dict())
 
 
 @dataclass
@@ -169,28 +258,7 @@ class BenchmarkConfig:
         else:
             # Flat structure - backward compatibility
             # Split fields into engine and eval
-            engine_fields = {
-                "model_path",
-                "tokenizer_path",
-                "model_name",
-                "decoding_strategy",
-                "mask_token_id",
-                "use_lora",
-                "lora_path",
-                "pre_merge_lora",
-                "tensor_parallel_size",
-                "data_parallel_size",
-                "gpu_memory_utilization",
-                "max_model_len",
-                "max_num_batched_tokens",
-                "max_num_reqs",
-                "enforce_eager",
-                "kv_cache_layout",
-                "decoding_thresholds",
-                "block_size",
-                "buffer_size",
-                "multi_block_prefix_full",
-            }
+            engine_fields = EngineConfig.accepted_input_fields()
 
             engine_dict = {k: v for k, v in config_dict.items() if k in engine_fields}
             eval_dict = {k: v for k, v in config_dict.items() if k not in engine_fields}

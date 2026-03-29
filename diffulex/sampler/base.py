@@ -147,6 +147,25 @@ class SamplerNoShiftLogits(SamplerBase):
 class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
     output_cls = SampleOutputBase
 
+    @staticmethod
+    def _prefill_mask_token_local_ids(req: DllmReq, block, req_logits: torch.Tensor) -> list[int]:
+        prefix_offset = int(getattr(req, "in_cache_len", 0))
+        local_ids = [idx - prefix_offset for idx in block.mask_token_global_ids]
+        if not local_ids:
+            return local_ids
+
+        if min(local_ids) < 0 or max(local_ids) >= req_logits.shape[0]:
+            raise IndexError(
+                "Prefill mask-token logits index out of bounds: "
+                f"req_id={getattr(req, 'req_id', '?')}, "
+                f"block_id={getattr(block, 'block_id', '?')}, "
+                f"in_cache_len={prefix_offset}, "
+                f"global_ids={block.mask_token_global_ids}, "
+                f"local_ids={local_ids}, "
+                f"req_logits_len={req_logits.shape[0]}"
+            )
+        return local_ids
+
     def forward(
         self,
         reqs: list[DllmReq],
@@ -192,7 +211,8 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
                     continue
 
                 if attn_metadata.is_prefill[idx]:
-                    mask_token_logits = req_logits[block.mask_token_global_ids, ...]
+                    local_ids = self._prefill_mask_token_local_ids(req, block, req_logits)
+                    mask_token_logits = req_logits[local_ids, ...]
                 else:
                     buf_offset = block.start - req.dllm_block_buffer.first_running_block.start
                     buf_ids = [buf_offset + i for i in block.mask_token_relative_ids]
@@ -296,7 +316,8 @@ class DllmSamplerShiftBase(SamplerShiftLogits):
                     continue
 
                 if attn_metadata.is_prefill[idx]:
-                    mask_token_logits = shifted_logits[block.mask_token_global_ids, ...]
+                    local_ids = DllmSamplerNoShiftBase._prefill_mask_token_local_ids(req, block, shifted_logits)
+                    mask_token_logits = shifted_logits[local_ids, ...]
                 else:
                     buf_offset = block.start - req.dllm_block_buffer.first_running_block.start
                     buf_ids = [buf_offset + i for i in block.mask_token_relative_ids]

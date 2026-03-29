@@ -287,6 +287,14 @@ Examples:
         default=None,
         help="Whether multi_bd should treat the prefix region as fully visible",
     )
+    parser.add_argument(
+        "--engine-arg",
+        dest="engine_args",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Extra Diffulex engine override. May be repeated; values are parsed with YAML semantics.",
+    )
     return parser
 
 

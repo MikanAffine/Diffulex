@@ -19,23 +19,46 @@ if TYPE_CHECKING:
 
 
 class ModelRunnerMultiBlockMixin:
+    @staticmethod
+    def _graph_seq_batch_sizes(max_num_seqs: int) -> list[int]:
+        """CUDA graph capture buckets, always bounded by max_num_seqs."""
+        if max_num_seqs <= 0:
+            return []
+
+        seq_bs = [1, 2, 4, 8]
+        seq_bs.extend(range(16, max_num_seqs + 1, 16))
+        seq_bs.append(max_num_seqs)
+        return sorted({bs for bs in seq_bs if 1 <= bs <= max_num_seqs})
+
     def _prepare_prefill_req(self: ModelRunnerBase, req: DllmReq):
-        input_ids = req.running_sequence
-        total_seqlen = len(input_ids)
-        in_cache_len = req.in_cache_len
+        input_ids = list(req.running_sequence)
+        q_len = len(input_ids)
+        context_len = req.in_cache_len
+        positions = list(range(context_len, context_len + q_len))
 
-        positions = list(range(in_cache_len, total_seqlen))
-        context_len = 0
+        # Prefix-cache prefill runs the model only on the uncached suffix.
+        seqlen_q = q_len
+        seqlen_k = q_len
 
-        seqlen_q = total_seqlen - in_cache_len
-        seqlen_k = total_seqlen
+        slot_mapping = []
+        for block in req.dllm_blocks:
+            if block.end <= context_len:
+                continue
+            if block.start >= req.running_len:
+                break
+            if block.rel_page_id >= len(req.page_table):
+                break
 
-        slot_mapping= []
-        for abs_page_id in req.page_table:
-            start = abs_page_id * self.page_size
-            end = start + self.page_size
-            slot_mapping.extend(range(start, end))
-        remain_num_tokens = len(input_ids) - len(slot_mapping)
+            abs_page_id = req.page_table[block.rel_page_id]
+            start = abs_page_id * self.page_size + block.start % self.page_size
+            end = start + self.block_size
+
+            if block.is_to_cache:
+                slot_mapping.extend(range(start, end))
+            else:
+                slot_mapping.extend([-1] * self.block_size)
+
+        remain_num_tokens = q_len - len(slot_mapping)
         slot_mapping.extend([-1] * remain_num_tokens)
 
         return dict(
@@ -59,13 +82,21 @@ class ModelRunnerMultiBlockMixin:
         seqlen_q = req.chunk_size
         seqlen_k = req.chunk_size
         valid_slice = req.valid_len
-
+    
         slot_mapping = []
-        for rel_page_id, abs_page_id in enumerate(req.page_table):
-            if rel_page_id >= req.num_pages_with_seq_len(req.in_cache_len):
-                start = abs_page_id * self.page_size
-                end = start + self.page_size
+        for block in req.dllm_block_buffer.dllm_blocks:
+            if block.rel_page_id >= len(req.page_table):
+                break
+            
+            abs_page_id = req.page_table[block.rel_page_id]
+            start = abs_page_id * self.page_size + block.start % self.page_size
+            end = start + self.block_size
+            
+            if block.is_to_cache:
                 slot_mapping.extend(range(start, end))
+            else:
+                slot_mapping.extend([-1] * self.block_size)
+                
         remain_num_tokens = len(input_ids) - len(slot_mapping)
         slot_mapping.extend([-1] * remain_num_tokens)
 
@@ -141,6 +172,7 @@ class ModelRunnerMultiBlockMixin:
             slot_mapping=slot_mapping_tensor,
             context_lens=context_lens_tensor,
             page_tables=page_tables,
+            page_size=self.page_size,
             block_size=self.block_size,
             kv_cache_layout=self.config.kv_cache_layout,
         )
@@ -178,6 +210,16 @@ class ModelRunnerMultiBlockMixin:
         )
         graph = self.graphs[captured_num_tokens]
         graph_vars = self.graph_vars
+        graph_capacity = int(graph_vars["context_lens"].size(0))
+        if captured_num_seqs > graph_capacity:
+            raise RuntimeError(
+                "Captured CUDA graph batch size exceeds allocated graph buffer capacity: "
+                f"captured_num_seqs={captured_num_seqs}, graph_capacity={graph_capacity}, "
+                f"captured_num_tokens={captured_num_tokens}, num_tokens={num_tokens}, "
+                f"max_num_reqs={self.config.max_num_reqs}, block_size={self.config.block_size}, "
+                f"buffer_size={self.config.buffer_size}"
+            )
+            
         # CUDA graph capture uses `slot_mapping=-1` / `page_tables=-1` for padding.
         # `zero_()` would turn them into 0: store kernel treats 0 as a valid slot (corrupts
         # KV at slot 0); attention Stage-1 treats page id 0 as a valid physical page.
@@ -267,7 +309,7 @@ class ModelRunnerMultiBlockMixin:
             cu_seqlens_k[i] = i * config.max_model_len
 
         self.graph_bs = []
-        seq_bs_list = [1, 2, 4, 8] + list(range(16, max_num_seqs + 16, 16))
+        seq_bs_list = self._graph_seq_batch_sizes(max_num_seqs)
         for num_seqs in seq_bs_list:
             self.graph_bs.append(num_seqs * chunk_size)
         self.graphs = {}
