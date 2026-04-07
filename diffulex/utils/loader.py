@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import torch
 import torch.nn as nn
@@ -9,6 +9,7 @@ from functools import partial
 from safetensors import safe_open
 from diffulex.config import Config
 from diffulex.logger import get_logger
+from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,133 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
     param.data.copy_(loaded_weight)
 
 
+def resolve_weight_spec(
+    model: nn.Module,
+    weight_name: str,
+    *,
+    config: Config,
+    named_modules: dict[str, nn.Module] | None = None,
+) -> ResolvedWeight | None:
+    if named_modules is None:
+        named_modules = dict(model.named_modules())
+
+    ctx = LoadContext(config=config, full_name=weight_name)
+    parts = weight_name.split(".")
+    for i in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:i])
+        module = named_modules.get(prefix)
+        if module is None:
+            continue
+
+        resolver = getattr(module, "resolve_checkpoint_weight", None)
+        if resolver is None:
+            continue
+
+        suffix = ".".join(parts[i:])
+        spec = resolver(suffix, ctx)
+        if spec is not None:
+            return spec
+
+    root_resolver = getattr(model, "resolve_checkpoint_weight", None)
+    if root_resolver is not None:
+        return root_resolver(weight_name, ctx)
+    return None
+
+
+def apply_resolved_weight(spec: ResolvedWeight, loaded_weight: torch.Tensor):
+    if spec.skip:
+        return
+
+    if spec.transform is not None:
+        loaded_weight = spec.transform(loaded_weight)
+
+    if spec.loader is not None:
+        spec.loader(loaded_weight)
+        return
+
+    if spec.param is not None:
+        weight_loader = getattr(spec.param, "weight_loader", default_weight_loader)
+        if spec.shard_id is None:
+            weight_loader(spec.param, loaded_weight)
+        else:
+            weight_loader(spec.param, loaded_weight, spec.shard_id)
+        return
+
+    if spec.buffer is not None:
+        spec.buffer.copy_(loaded_weight)
+        return
+
+    raise ValueError("ResolvedWeight must specify loader, param, buffer, or skip.")
+
+
+def try_load_direct(model: nn.Module, weight_name: str, loaded_weight: torch.Tensor) -> bool:
+    try:
+        param = model.get_parameter(weight_name)
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        weight_loader(param, loaded_weight)
+        return True
+    except (AttributeError, KeyError):
+        pass
+
+    try:
+        buffer = model.get_buffer(weight_name)
+        buffer.copy_(loaded_weight)
+        return True
+    except (AttributeError, KeyError):
+        return False
+
+
+def try_load_via_packed_mapping(
+    model: nn.Module,
+    packed_modules_mapping: dict,
+    weight_name: str,
+    loaded_weight: torch.Tensor,
+    config: Config,
+) -> bool:
+    for k in packed_modules_mapping:
+        if k not in weight_name:
+            continue
+
+        if config.model_name == "llada" and k == "ff_out" and "transformer.ff_out" in weight_name:
+            continue
+        elif config.model_name == "llada" and k == "transformer.ff_out":
+            v, shard_id = packed_modules_mapping[k]
+            assert v == "lm_head"
+            param_name = "lm_head.weight"
+        else:
+            v, shard_id = packed_modules_mapping[k]
+            param_name = weight_name.replace(k, v)
+
+        if "layernorm" in param_name:
+            try:
+                param = model.get_parameter(param_name)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            except (AttributeError, KeyError):
+                try:
+                    buffer = model.get_buffer(param_name)
+                    buffer.copy_(loaded_weight)
+                except (AttributeError, KeyError):
+                    pass
+        else:
+            try:
+                param = model.get_parameter(param_name)
+                weight_loader = partial(
+                    getattr(param, "weight_loader"),
+                    param,
+                    loaded_weight,
+                )
+                if shard_id is None:
+                    weight_loader()
+                else:
+                    weight_loader(shard_id)
+            except (AttributeError, KeyError):
+                pass
+        return True
+
+    return False
+
+
 def load_model(model: nn.Module, config: Config):
     """Load model weights and optionally LoRA weights."""
     # Enable LoRA for linear layers if LoRA is enabled
@@ -59,60 +187,26 @@ def load_model(model: nn.Module, config: Config):
 
     # Load base model weights
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
+    named_modules = dict(model.named_modules())
     for file in tqdm(glob(os.path.join(config.model, "*.safetensors")), desc="Loading base model"):
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
-                for k in packed_modules_mapping:
-                    if k in weight_name:
-                        if config.model_name == "llada" and k == "ff_out" and "transformer.ff_out" in weight_name:
-                            continue
-                        elif config.model_name == "llada" and k == "transformer.ff_out":
-                            v, shard_id = packed_modules_mapping[k]
-                            assert v == "lm_head"
-                            param_name = "lm_head.weight"
-                        else:
-                            v, shard_id = packed_modules_mapping[k]
-                            param_name = weight_name.replace(k, v)
+                loaded_weight = f.get_tensor(weight_name)
 
-                        if "layernorm" in param_name:
-                            try:
-                                param = model.get_parameter(param_name)
-                                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                                weight_loader(param, f.get_tensor(weight_name))
-                            except (AttributeError, KeyError):
-                                # Try buffer fallback for non-parameter weights
-                                try:
-                                    buffer = model.get_buffer(param_name)
-                                    buffer.copy_(f.get_tensor(weight_name))
-                                except (AttributeError, KeyError):
-                                    pass
-                        else:
-                            try:
-                                param = model.get_parameter(param_name)
-                                weight_loader = partial(
-                                    getattr(param, "weight_loader"),
-                                    param,
-                                    f.get_tensor(weight_name),
-                                )
-                                if shard_id is None:
-                                    weight_loader()
-                                else:
-                                    weight_loader(shard_id)
-                            except (AttributeError, KeyError):
-                                pass
-                        break
-                else:
-                    try:
-                        param = model.get_parameter(weight_name)
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                        weight_loader(param, f.get_tensor(weight_name))
-                    except (AttributeError, KeyError):
-                        # Try buffer fallback for non-parameter weights
-                        try:
-                            buffer = model.get_buffer(weight_name)
-                            buffer.copy_(f.get_tensor(weight_name))
-                        except (AttributeError, KeyError):
-                            pass
+                spec = resolve_weight_spec(
+                    model,
+                    weight_name,
+                    config=config,
+                    named_modules=named_modules,
+                )
+                if spec is not None:
+                    apply_resolved_weight(spec, loaded_weight)
+                    continue
+
+                if try_load_via_packed_mapping(model, packed_modules_mapping, weight_name, loaded_weight, config):
+                    continue
+
+                try_load_direct(model, weight_name, loaded_weight)
 
     # Load LoRA weights if enabled
     if config.use_lora and config.lora_path:
@@ -250,3 +344,4 @@ def load_lora_weights(
         logger.warning("Continuing with base model only")
 
     return model
+
