@@ -1,33 +1,12 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
-
-@dataclass(frozen=True)
-class TopKOutput:
-    weights: torch.Tensor
-    ids: torch.Tensor
-    router_logits: torch.Tensor
+from diffulex.moe.topk.base import TopKRouter
+from diffulex.moe.topk.datatype import TopKOutput
 
 
-class TopKRouter(nn.Module):
-    """Top-k expert selection for MoE inference."""
-
-    def __init__(
-        self,
-        top_k: int,
-        *,
-        renormalize: bool = True,
-        scoring_func: str = "softmax",
-    ) -> None:
-        super().__init__()
-        self.top_k = top_k
-        self.renormalize = renormalize
-        self.scoring_func = scoring_func
+class TrivialTopKRouter(TopKRouter):
+    """Trivial pytorch implementation for reference"""
 
     def forward(self, router_logits: torch.Tensor) -> TopKOutput:
         if self.scoring_func == "softmax":
@@ -47,6 +26,3 @@ class TopKRouter(nn.Module):
             ids=topk_ids,
             router_logits=router_logits,
         )
-
-
-__all__ = ["TopKOutput", "TopKRouter"]

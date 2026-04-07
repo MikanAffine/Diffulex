@@ -63,3 +63,5 @@ cutlass
 output/
 MultiBD
 mini-sglang
+.claude
+.codex

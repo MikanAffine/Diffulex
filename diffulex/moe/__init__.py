@@ -6,17 +6,19 @@ from diffulex.moe.config import (
     get_norm_topk_prob,
     is_moe_layer,
 )
-from diffulex.moe.moe_impl import SparseMoEBlock
+from diffulex.moe.layers import FusedMoE, SparseMoEBlock
 
 
 def build_mlp_or_moe(config, layer_idx: int, dense_factory):
     """Build a dense MLP or MoE block according to the config."""
     if is_moe_layer(config, layer_idx):
+        return FusedMoE.from_config(config)
         return SparseMoEBlock.from_config(config)
     return dense_factory()
 
 
 __all__ = [
+    "FusedMoE",
     "SparseMoEBlock",
     "build_mlp_or_moe",
     "get_mlp_only_layers",

@@ -5,6 +5,7 @@ from diffulex.sampler.base import DllmSamplerNoShiftBase
 
 
 @AutoSampler.register("sdar")
+@AutoSampler.register("sdar_moe")
 class SDARSampler(DllmSamplerNoShiftBase):
     def _compute_accepted_ids(
         self,
