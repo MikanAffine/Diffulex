@@ -114,7 +114,7 @@ class DllmBlock:
 
     @property
     def should_force_decode_topk(self):
-        return self.prev_block.is_semi_complete
+        return self.prev_block is not None and self.prev_block.is_semi_complete
 
     @property
     def should_add_block(self):

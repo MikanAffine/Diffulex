@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from diffulex.engine.status import DllmBlockStatus
+from diffulex.engine.dllm_block import DllmBlock
 from diffulex.strategy.multi_bd.engine.kv_cache_manager import MultiBDKVCacheManager
 from diffulex.strategy.multi_bd.engine.request import MultiBDReq
 
@@ -156,3 +157,43 @@ def test_apply_cached_prefix_pages_marks_prefix_blocks_in_cache() -> None:
     assert req2.in_cache_len == 64
     assert req2.page_cache_missed == [False, False]
     assert all(req2.dllm_blocks[i].status == DllmBlockStatus.IN_CACHE for i in range(2))
+
+
+def test_first_block_does_not_force_decode_topk_without_prev_block() -> None:
+    block = DllmBlock(
+        block_id=0,
+        start=0,
+        end=32,
+        block_size=32,
+        mask_token_id=-1,
+        thresholds=SimpleNamespace(
+            add_block_threshold=0.1,
+            semi_complete_threshold=0.9,
+            decoding_threshold=0.9,
+        ),
+        prev_block=None,
+    )
+
+    assert block.should_force_decode_topk is False
+
+
+def test_request_last_block_finished_is_false_without_prev_block() -> None:
+    config = SimpleNamespace(
+        block_size=32,
+        buffer_size=1,
+        mask_token_id=-1,
+        decoding_thresholds=SimpleNamespace(
+            add_block_threshold=0.1,
+            semi_complete_threshold=0.9,
+            decoding_threshold=0.9,
+        ),
+        eos=-1,
+        max_model_len=2048,
+    )
+    req = MultiBDReq(list(range(16)))
+    req.page_size = 32
+    req.init_multi_block(config)
+    req.make_pending()
+    req.step()
+
+    assert req.last_block_finished is False

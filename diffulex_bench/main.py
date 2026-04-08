@@ -342,6 +342,11 @@ def load_config_from_args(args) -> BenchmarkConfig:
         BenchmarkConfig instance
     """
     logger = get_logger(__name__)
+    default_args = create_argument_parser().parse_args([])
+
+    def was_provided(name: str) -> bool:
+        return getattr(args, name) != getattr(default_args, name)
+
     if getattr(args, "max_num_reqs", None) is None and getattr(args, "max_num_seqs", None) is not None:
         logger.warning(
             "--max-num-seqs is deprecated and will be removed in a future release; please use --max-num-reqs instead."
@@ -386,23 +391,23 @@ def load_config_from_args(args) -> BenchmarkConfig:
         logger.info(f"Loaded configuration from: {config_path}")
 
         # Override with command line arguments if provided
-        if args.model_path:
+        if was_provided("model_path") and args.model_path:
             config.engine.model_path = args.model_path
-        if getattr(args, "tokenizer_path", None):
+        if was_provided("tokenizer_path") and getattr(args, "tokenizer_path", None):
             config.engine.tokenizer_path = args.tokenizer_path
-        if args.dataset:
+        if was_provided("dataset") and args.dataset:
             config.eval.dataset_name = args.dataset
-        if args.dataset_limit is not None:
+        if was_provided("dataset_limit") and args.dataset_limit is not None:
             config.eval.dataset_limit = args.dataset_limit
-        if getattr(args, "max_tokens", None) is not None:
+        if was_provided("max_tokens") and getattr(args, "max_tokens", None) is not None:
             config.eval.max_tokens = args.max_tokens
-        if getattr(args, "max_nfe", None) is not None:
+        if was_provided("max_nfe") and getattr(args, "max_nfe", None) is not None:
             config.eval.max_nfe = args.max_nfe
-        if getattr(args, "max_repetition_run", None) is not None:
+        if was_provided("max_repetition_run") and getattr(args, "max_repetition_run", None) is not None:
             config.eval.max_repetition_run = args.max_repetition_run
-        if getattr(args, "temperature", None) is not None:
+        if was_provided("temperature") and getattr(args, "temperature", None) is not None:
             config.eval.temperature = args.temperature
-        if args.output_dir:
+        if was_provided("output_dir") and args.output_dir:
             config.eval.output_dir = args.output_dir
         if getattr(args, "include_path", None) is not None:
             config.eval.include_path = args.include_path

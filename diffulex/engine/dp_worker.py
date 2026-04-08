@@ -50,6 +50,7 @@ def _dp_child_entry(config: Config, dp_idx: int, local_devices: list[int], conn)
             shm_name=f"{config.shm_name}_{dp_idx}",
             enforce_eager=config.enforce_eager,
             page_size=config.page_size,
+            enable_prefix_caching=config.enable_prefix_caching,
             num_pages=config.num_pages,
             k_cache_hdim_split_factor_x=config.k_cache_hdim_split_factor_x,
             kv_cache_layout=config.kv_cache_layout,

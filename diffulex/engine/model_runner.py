@@ -1,3 +1,4 @@
+import os
 import torch
 import pickle
 
@@ -35,7 +36,21 @@ class ModelRunnerBase(
         hf_config = config.hf_config
         self.block_size = config.block_size
         self.page_size = config.kv_cache_page_size
-        self.enforce_eager = config.enforce_eager
+        # Reference attention debug path is not CUDA-graph-safe; force eager to avoid
+        # graph-capture failures during diagnostics.
+        use_reference_attn = os.environ.get("DIFFULEX_USE_REFERENCE_MULTI_BLOCK_ATTN", "0") == "1"
+        use_reference_cached_context_attn = os.environ.get("DIFFULEX_USE_REFERENCE_CACHED_CONTEXT_ATTN", "0") == "1"
+        self.enforce_eager = (
+            config.enforce_eager
+            or use_reference_attn
+            or use_reference_cached_context_attn
+        )
+        if (use_reference_attn or use_reference_cached_context_attn) and not config.enforce_eager and rank == 0:
+            logger.warning(
+                "Reference attention diagnostics detected; forcing enforce_eager=True "
+                "to bypass CUDA graph capture for reference attention diagnostics."
+            )
+        config.enforce_eager = self.enforce_eager
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event

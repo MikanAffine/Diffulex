@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,6 +20,75 @@ class SamplerBase(nn.Module):
         from diffulex.attention import fetch_attn_metadata
 
         self.fetch_attn_metadata = fetch_attn_metadata
+        self._trace_sampler_req_ids = {
+            int(x.strip())
+            for x in os.environ.get("DIFFULEX_TRACE_SAMPLER_REQ_IDS", "").split(",")
+            if x.strip().isdigit()
+        }
+        self._trace_sampler_max_step = int(os.environ.get("DIFFULEX_TRACE_SAMPLER_MAX_STEP", "1"))
+        self._trace_sampler_topk = int(os.environ.get("DIFFULEX_TRACE_SAMPLER_TOPK", "5"))
+        self._trace_sampler_pos_limit = int(os.environ.get("DIFFULEX_TRACE_SAMPLER_POS_LIMIT", "2"))
+
+    def _should_trace_sampler(self, req: DllmReq) -> bool:
+        if not self._trace_sampler_req_ids:
+            return False
+        req_id = int(getattr(req, "req_id", -1))
+        step_id = int(getattr(req, "nfe", 0))
+        return req_id in self._trace_sampler_req_ids and step_id <= self._trace_sampler_max_step
+
+    def _build_sampler_debug(
+        self,
+        req: DllmReq,
+        block,
+        mask_token_logits: torch.Tensor,
+        sampled_tokens: torch.Tensor,
+        accepted_ids_list: list[int],
+        confidence: torch.Tensor,
+        initial_confidence: torch.Tensor,
+        threshold: float | None,
+    ) -> dict:
+        pos_limit = min(int(mask_token_logits.shape[0]), self._trace_sampler_pos_limit)
+        if pos_limit <= 0:
+            return {}
+
+        logits_cpu = mask_token_logits[:pos_limit].detach().float().cpu()
+        probs_cpu = torch.softmax(logits_cpu, dim=-1)
+        sampled_cpu = sampled_tokens[:pos_limit].detach().cpu().tolist()
+        conf_cpu = confidence[:pos_limit].detach().float().cpu().tolist()
+        init_conf_cpu = initial_confidence[:pos_limit].detach().float().cpu().tolist()
+
+        accepted_set = set(accepted_ids_list)
+        topk = min(self._trace_sampler_topk, logits_cpu.shape[-1])
+        topk_vals, topk_ids = torch.topk(logits_cpu, k=topk, dim=-1)
+        topk_probs = torch.gather(probs_cpu, -1, topk_ids)
+
+        per_pos = []
+        for i in range(pos_limit):
+            sampled_id = int(sampled_cpu[i])
+            sampled_prob = float(probs_cpu[i, sampled_id].item())
+            per_pos.append(
+                {
+                    "pos": i,
+                    "accepted": i in accepted_set,
+                    "sampled_id": sampled_id,
+                    "sampled_prob": sampled_prob,
+                    "confidence": float(conf_cpu[i]),
+                    "initial_confidence": float(init_conf_cpu[i]),
+                    "topk_ids": topk_ids[i].detach().cpu().tolist(),
+                    "topk_logits": [float(x) for x in topk_vals[i].detach().cpu().tolist()],
+                    "topk_probs": [float(x) for x in topk_probs[i].detach().cpu().tolist()],
+                }
+            )
+
+        return {
+            "req_id": int(getattr(req, "req_id", -1)),
+            "step_id": int(getattr(req, "nfe", 0)),
+            "block_id": int(getattr(block, "block_id", -1)),
+            "threshold": None if threshold is None else float(threshold),
+            "num_mask_tokens": int(getattr(block, "num_mask_tokens", 0)),
+            "accepted_ids": list(accepted_ids_list),
+            "positions": per_pos,
+        }
 
     def top_p_logits(self, logits, top_p):
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
@@ -66,7 +137,12 @@ class SamplerBase(nn.Module):
             except Exception:
                 initial_confidence, x0 = probs.max(dim=-1)
         else:
-            initial_confidence, x0 = probs.max(dim=-1)
+            initial_confidence = probs.max(dim=-1).values
+            tie_mask = probs == initial_confidence.unsqueeze(-1)
+            # Greedy decode should be deterministic even when bf16 quantization makes
+            # multiple vocab entries exactly tie for top-1. Prefer the highest token id
+            # to avoid `torch.max`'s default low-id bias on equal values.
+            x0 = probs.size(-1) - 1 - tie_mask.flip(dims=[-1]).to(torch.int32).argmax(dim=-1)
 
         confidence = initial_confidence.clone()
 
@@ -92,6 +168,7 @@ class SampleOutputBase:
     mask_token_rel_ids_map: dict[str, dict[str, list[int]]] | None = None
     confidence_map: dict[str, dict[str, list[float]]] | None = None
     initial_confidence_map: dict[str, dict[str, list[float]]] | None = None
+    sampler_debug_map: dict[str, dict[str, dict]] | None = None
 
     def __post_init__(self):
         self.accepted_ids_map = edict(self.accepted_ids_map)
@@ -100,6 +177,7 @@ class SampleOutputBase:
         self.mask_token_rel_ids_map = edict(self.mask_token_rel_ids_map or {})
         self.confidence_map = edict(self.confidence_map or {})
         self.initial_confidence_map = edict(self.initial_confidence_map or {})
+        self.sampler_debug_map = edict(self.sampler_debug_map or {})
 
 
 class SamplerShiftLogits(SamplerBase):
@@ -161,7 +239,16 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
 
     @staticmethod
     def _prefill_mask_token_local_ids(req: DllmReq, block, req_logits: torch.Tensor) -> list[int]:
-        prefix_offset = int(getattr(req, "in_cache_len", 0))
+        # Use contiguous cached prefix length for prefill-logits alignment.
+        # `in_cache_len` may include non-prefix cached blocks and can overshoot.
+        prefix_offset = int(
+            getattr(
+                req,
+                "contiguous_in_cache_prefix_len",
+                getattr(req, "in_cache_len", 0),
+            )
+            or 0
+        )
         local_ids = [idx - prefix_offset for idx in block.mask_token_global_ids]
         if not local_ids:
             return local_ids
@@ -199,6 +286,7 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
         mask_token_rel_ids_map = {}
         confidence_map = {}
         initial_confidence_map = {}
+        sampler_debug_map = {}
 
         for idx, (temperature, req, req_logits) in enumerate(zip(temperatures, reqs, split_logits)):
             true_local_ids_sub_map = {}
@@ -207,6 +295,7 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
             mask_token_rel_ids_sub_map = {}
             confidence_sub_map = {}
             initial_confidence_sub_map = {}
+            sampler_debug_sub_map = {}
 
             for block_id, block in enumerate(req.dllm_blocks):
                 if not block.is_active or (block.num_mask_tokens == 0):
@@ -246,6 +335,20 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
                 mask_token_rel_ids_sub_map[block_id_str] = list(block.mask_token_relative_ids)
                 confidence_sub_map[block_id_str] = confidence.to(device="cpu").tolist()
                 initial_confidence_sub_map[block_id_str] = initial_confidence.to(device="cpu").tolist()
+                if self._should_trace_sampler(req):
+                    threshold = kwargs.get("threshold", None)
+                    if threshold is None:
+                        threshold = getattr(getattr(block, "thresholds", None), "decoding_threshold", None)
+                    sampler_debug_sub_map[block_id_str] = self._build_sampler_debug(
+                        req=req,
+                        block=block,
+                        mask_token_logits=mask_token_logits,
+                        sampled_tokens=sampled_tokens,
+                        accepted_ids_list=accepted_ids_list,
+                        confidence=confidence,
+                        initial_confidence=initial_confidence,
+                        threshold=threshold,
+                    )
 
             req_id_str = str(req.req_id)
             true_local_ids_map[req_id_str] = true_local_ids_sub_map
@@ -254,6 +357,7 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
             mask_token_rel_ids_map[req_id_str] = mask_token_rel_ids_sub_map
             confidence_map[req_id_str] = confidence_sub_map
             initial_confidence_map[req_id_str] = initial_confidence_sub_map
+            sampler_debug_map[req_id_str] = sampler_debug_sub_map
 
         return self.output_cls(
             true_local_ids_map=true_local_ids_map,
@@ -262,6 +366,7 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
             mask_token_rel_ids_map=mask_token_rel_ids_map,
             confidence_map=confidence_map,
             initial_confidence_map=initial_confidence_map,
+            sampler_debug_map=sampler_debug_map,
         )
 
     def _compute_accepted_ids(
@@ -299,6 +404,7 @@ class DllmSamplerShiftBase(SamplerShiftLogits):
         mask_token_rel_ids_map = {}
         confidence_map = {}
         initial_confidence_map = {}
+        sampler_debug_map = {}
 
         for idx, (temperature, req, req_logits) in enumerate(zip(temperatures, reqs, split_logits)):
             true_local_ids_sub_map = {}
@@ -307,6 +413,7 @@ class DllmSamplerShiftBase(SamplerShiftLogits):
             mask_token_rel_ids_sub_map = {}
             confidence_sub_map = {}
             initial_confidence_sub_map = {}
+            sampler_debug_sub_map = {}
             if req_logits.shape[0] == 0:
                 req_id_str = str(req.req_id)
                 true_local_ids_map[req_id_str] = true_local_ids_sub_map
@@ -315,6 +422,7 @@ class DllmSamplerShiftBase(SamplerShiftLogits):
                 mask_token_rel_ids_map[req_id_str] = mask_token_rel_ids_sub_map
                 confidence_map[req_id_str] = confidence_sub_map
                 initial_confidence_map[req_id_str] = initial_confidence_sub_map
+                sampler_debug_map[req_id_str] = sampler_debug_sub_map
                 continue
             last_logits = self._fetch_last_logits(req_logits, req)
             shifted_logits = self._shift_logits(req_logits, last_logits)
@@ -355,6 +463,20 @@ class DllmSamplerShiftBase(SamplerShiftLogits):
                 mask_token_rel_ids_sub_map[block_id_str] = list(block.mask_token_relative_ids)
                 confidence_sub_map[block_id_str] = confidence.to(device="cpu").tolist()
                 initial_confidence_sub_map[block_id_str] = initial_confidence.to(device="cpu").tolist()
+                if self._should_trace_sampler(req):
+                    threshold = kwargs.get("threshold", None)
+                    if threshold is None:
+                        threshold = getattr(getattr(block, "thresholds", None), "decoding_threshold", None)
+                    sampler_debug_sub_map[block_id_str] = self._build_sampler_debug(
+                        req=req,
+                        block=block,
+                        mask_token_logits=mask_token_logits,
+                        sampled_tokens=sampled_tokens,
+                        accepted_ids_list=accepted_ids_list,
+                        confidence=confidence,
+                        initial_confidence=initial_confidence,
+                        threshold=threshold,
+                    )
 
             req_id_str = str(req.req_id)
             true_local_ids_map[req_id_str] = true_local_ids_sub_map
@@ -363,6 +485,7 @@ class DllmSamplerShiftBase(SamplerShiftLogits):
             mask_token_rel_ids_map[req_id_str] = mask_token_rel_ids_sub_map
             confidence_map[req_id_str] = confidence_sub_map
             initial_confidence_map[req_id_str] = initial_confidence_sub_map
+            sampler_debug_map[req_id_str] = sampler_debug_sub_map
 
         return self.output_cls(
             true_local_ids_map=true_local_ids_map,
@@ -371,6 +494,7 @@ class DllmSamplerShiftBase(SamplerShiftLogits):
             mask_token_rel_ids_map=mask_token_rel_ids_map,
             confidence_map=confidence_map,
             initial_confidence_map=initial_confidence_map,
+            sampler_debug_map=sampler_debug_map,
         )
 
     def _compute_accepted_ids(

@@ -73,6 +73,21 @@ for output in outputs:
 
 For more examples, check out the [examples](examples/) directory.
 
+## Prefix Caching Validation
+
+Use the following scripts to validate `multi_bd + prefix caching`:
+
+```bash
+# Fast CI gate: engine + kernel regressions only
+./script/test_multi_bd_prefix_caching_ci.sh
+
+# Full local validation: engine + kernel + real-model comparison
+./script/test_multi_bd_prefix_caching.sh
+
+# Nightly/full check with explicit model path
+MODEL_PATH=/data1/ckpts/JetLM/SDAR-1.7B-Chat-b32 ./script/test_multi_bd_prefix_caching_nightly.sh
+```
+
 ## Upcoming Features
 
 Check our [Diffulex v0.0.1 release plan](https://github.com/SJTU-DENG-Lab/Diffulex/issues/14) for upcoming features.

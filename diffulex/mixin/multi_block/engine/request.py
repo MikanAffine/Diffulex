@@ -31,6 +31,7 @@ class DllmReqMultiBlockMixin:
     def init_multi_block(self: DllmReq, config: Config):
         self.is_multi_block = True
         self.status_history = [self.status]
+        self.completion_reason = None
 
         self.block_size = config.block_size
         self.buffer_size = config.buffer_size
@@ -99,14 +100,10 @@ class DllmReqMultiBlockMixin:
 
     @property
     def eos_token_generated(self) -> bool:
-        seq = self.running_sequence
-        if seq is None:
-            return False
-        eos_detect_fn = lambda x: self.eos_token_id in x
-        last_in_cache_block = self.dllm_block_buffer.first_running_block.prev_block
-        return eos_detect_fn(seq) or (
-            last_in_cache_block.is_last_in_context and eos_detect_fn(last_in_cache_block.token_ids)
-        ) or eos_detect_fn(self.token_ids)
+        # Only inspect generated segment; prompt tokens may also contain chat delimiters
+        # such as <|im_end|>, which must not trigger immediate completion.
+        generated_seq = self.token_ids[self.prefix_len :]
+        return self.eos_token_id in generated_seq
 
     @property
     def num_prefix_blocks(self) -> int:
@@ -154,14 +151,14 @@ class DllmReqMultiBlockMixin:
     @property
     def running_sequence(self) -> list[int]:
         if self.is_prefilling:
-            return self.token_ids[self.in_cache_len:self.running_len]
+            return self.token_ids[self.contiguous_in_cache_prefix_len : self.running_len]
         elif self.is_decoding or self.is_completed:
             return self.dllm_block_buffer.buffer_sequence
 
     @property
     def running_position_ids(self) -> list[int]:
         if self.is_prefilling:
-            return range(self.in_cache_len, self.running_len)
+            return range(self.contiguous_in_cache_prefix_len, self.running_len)
         elif self.is_decoding or self.is_completed:
             return self.dllm_block_buffer.buffer_position_ids
 
@@ -266,6 +263,23 @@ class DllmReqMultiBlockMixin:
         return sum(block.block_size for block in self.dllm_blocks if block.is_in_cache)
 
     @property
+    def contiguous_in_cache_prefix_len(self) -> int:
+        """Length of the contiguous cached prefix from block 0.
+
+        `in_cache_len` counts all IN_CACHE blocks and can be larger than the true
+        left-prefix when state transitions leave non-prefix cached blocks. For
+        prefill q/pos alignment we require the contiguous prefix only.
+        """
+        total = 0
+        for block in self.dllm_blocks:
+            if block.start != total:
+                break
+            if not block.is_in_cache:
+                break
+            total += block.block_size
+        return total
+
+    @property
     def cache_len(self) -> int:
         return sum(block.block_size for block in self.dllm_blocks if block.is_to_cache or block.is_in_cache)
 
@@ -316,7 +330,7 @@ class DllmReqMultiBlockMixin:
     @property
     def last_block_finished(self) -> bool:
         inspected_block = self.dllm_block_buffer.first_running_block.prev_block
-        return inspected_block.is_complete and inspected_block.is_last_in_context
+        return inspected_block is not None and inspected_block.is_complete and inspected_block.is_last_in_context
 
     @property
     def pure_prefill_without_mask_token(self) -> bool:
@@ -370,11 +384,15 @@ class DllmReqMultiBlockMixin:
             DllmReqStatus.PREFILLING,
         ]
 
-    def force_deactivate(self):
+    def force_deactivate(self, reason: str | None = None):
+        if reason is not None:
+            self.completion_reason = reason
         self.status = DllmReqStatus.COMPLETED
 
-    def deactivate(self):
+    def deactivate(self, reason: str | None = None):
         if self.is_running:
+            if reason is not None:
+                self.completion_reason = reason
             self.status = DllmReqStatus.COMPLETED
 
     def step(self):
@@ -450,7 +468,8 @@ class DllmReqMultiBlockMixin:
         block_id = 0
         while block_id < self.dllm_block_buffer.buffer_size:
             block = self.dllm_block_buffer.dllm_blocks[block_id]
-            if block.is_active and block.is_complete and (block.prev_block.is_to_cache or block.prev_block.is_in_cache):
+            prev_ready = block.prev_block is None or block.prev_block.is_to_cache or block.prev_block.is_in_cache
+            if block.is_active and block.is_complete and prev_ready:
                 block.to_cache()
                 block_id += 1
             elif block.is_to_cache:
@@ -474,4 +493,16 @@ class DllmReqMultiBlockMixin:
         ) and self.last_block_finished:
             completed_blocks = [block.is_complete for block in self.dllm_block_buffer.valid_blocks]
             if all(completed_blocks):
-                self.deactivate()
+                if self.eos_token_generated:
+                    reason = "eos_token_generated"
+                elif self.max_new_tokens_reached:
+                    reason = "max_new_tokens_reached"
+                elif self.max_model_len_reached:
+                    reason = "max_model_len_reached"
+                elif self.max_nfe_reached:
+                    reason = "max_nfe_reached"
+                elif self.max_repetition_run_reached:
+                    reason = "max_repetition_run_reached"
+                else:
+                    reason = "unknown_postprocess_deactivate"
+                self.deactivate(reason=reason)

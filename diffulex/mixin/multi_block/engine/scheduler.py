@@ -3,12 +3,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from diffulex.engine.request import DllmReq, DllmReqStatus
+from diffulex.logger import get_logger
 
 if TYPE_CHECKING:
     from diffulex.engine.scheduler import SchedulerBase
 
 
 class SchedulerMultiBlockMixin:
+    _logger = get_logger(__name__)
     def init_multi_block(self: SchedulerBase) -> None:
         self.block_size = self.config.block_size
 
@@ -110,6 +112,13 @@ class SchedulerMultiBlockMixin:
             true_ids_map = sample_output.true_local_ids_map.get(req_id_str, {})
             accepted_ids_map = sample_output.accepted_ids_map.get(req_id_str, {})
             sampled_tokens_map = sample_output.sampled_tokens_map.get(req_id_str, {})
+            sampler_debug_map = getattr(sample_output, "sampler_debug_map", {}).get(req_id_str, {})
+            req._sampler_trace = {
+                "true_local_ids_map": true_ids_map,
+                "accepted_ids_map": accepted_ids_map,
+                "sampled_tokens_map": sampled_tokens_map,
+                "sampler_debug_map": sampler_debug_map,
+            }
             for block_id, accepted_ids in accepted_ids_map.items():
                 if not accepted_ids:
                     continue
@@ -125,8 +134,23 @@ class SchedulerMultiBlockMixin:
             req.postprocess()
             req.nfe += 1
             if req.max_nfe_reached or req.max_repetition_run_reached:
-                req.force_deactivate()
+                reason = "max_nfe_reached" if req.max_nfe_reached else "max_repetition_run_reached"
+                req.force_deactivate(reason=reason)
             if req.is_completed:
+                if getattr(req, "completion_reason", None) is None:
+                    req.completion_reason = "completed_without_reason"
+                self._logger.info(
+                    "Req %s marked FINISHED (reason=%s, eos=%s, max_new=%s, max_model_len=%s, max_nfe=%s, max_repeat=%s, nfe=%s, gen_tokens=%s)",
+                    req.req_id,
+                    req.completion_reason,
+                    req.eos_token_generated,
+                    req.max_new_tokens_reached,
+                    req.max_model_len_reached,
+                    req.max_nfe_reached,
+                    req.max_repetition_run_reached,
+                    req.nfe,
+                    len(req.truncated_response) if req.truncated_response is not None else -1,
+                )
                 req.status = DllmReqStatus.FINISHED
                 self.kv_cache_manager.free(req)
                 if req in self.running_reqs:

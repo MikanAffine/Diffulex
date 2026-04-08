@@ -32,7 +32,8 @@ class MultiBlockKVCacheManagerMixin:
         prefix = self.pages[page_table[-2]].hash if len(page_table) > 1 else -1
         h = self.compute_hash(token_ids, prefix)
         last_page.update(h, token_ids)
-        self.hash_to_page_id[h] = last_page.page_id
+        if getattr(self, "enable_prefix_caching", True):
+            self.hash_to_page_id[h] = last_page.page_id
 
     def may_append_multi_block(self: KVCacheManagerBase, req: DllmReq) -> None:
         if req.cache_len == 0:

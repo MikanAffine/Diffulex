@@ -51,6 +51,7 @@ class Config:
     hf_config: AutoConfig | None = None
     eos: int = -1
     page_size: int = 32
+    enable_prefix_caching: bool = True
     num_pages: int = -1
     k_cache_hdim_split_factor_x: int = 8
     kv_cache_layout: str = "unified"  # "unified" or "distinct"
@@ -58,6 +59,20 @@ class Config:
     def __post_init__(self):
         if not os.path.isdir(self.model):
             raise ValueError(f"model must be an existing directory, got: {self.model}")
+
+        if self.decoding_strategy == "d2f":
+            if not self.multi_block_prefix_full:
+                logger.warning("Forcing multi_block_prefix_full=True for decoding_strategy=d2f.")
+            if self.enable_prefix_caching:
+                logger.warning("Disabling prefix caching for decoding_strategy=d2f.")
+            self.multi_block_prefix_full = True
+            self.enable_prefix_caching = False
+        elif self.decoding_strategy == "multi_bd":
+            if self.multi_block_prefix_full:
+                logger.warning("Forcing multi_block_prefix_full=False for decoding_strategy=multi_bd.")
+            self.multi_block_prefix_full = False
+            if self.enable_prefix_caching:
+                logger.info("Enabling prefix caching for decoding_strategy=multi_bd.")
 
         if self.page_size % 4 != 0:
             raise ValueError(f"page_size must be divisible by 4, got: {self.page_size}")
@@ -131,10 +146,13 @@ class Config:
         if isinstance(self.decoding_thresholds, dict):
             self.decoding_thresholds = DecodingThresholds(**self.decoding_thresholds)
         elif self.decoding_thresholds is None:
+            add_block_threshold = d.get("add_block_threshold")
+            semi_complete_threshold = d.get("semi_complete_threshold")
+            decoding_threshold = d.get("decoding_threshold")
             self.decoding_thresholds = DecodingThresholds(
-                add_block_threshold=d.get("add_block_threshold", 0.1),
-                semi_complete_threshold=d.get("semi_complete_threshold", 0.9),
-                decoding_threshold=d.get("decoding_threshold", 0.9),
+                add_block_threshold=0.1 if add_block_threshold is None else add_block_threshold,
+                semi_complete_threshold=0.9 if semi_complete_threshold is None else semi_complete_threshold,
+                decoding_threshold=0.9 if decoding_threshold is None else decoding_threshold,
             )
 
     @property

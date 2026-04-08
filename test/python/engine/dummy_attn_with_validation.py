@@ -40,8 +40,12 @@ class AttentionWithValidation(OriginalAttention):
         context_lens = metadata.context_lens
         cu_seqlens_q = metadata.cu_seqlens_q
         valid_slices = getattr(metadata, 'valid_slices', None)
+        status_table = getattr(metadata, "status_table", None)
+        prefix_lens = getattr(metadata, "prefix_lens", None)
+        padded_prefix_lens = getattr(metadata, "padded_prefix_lens", None)
         page_size = metadata.page_size
         block_size = metadata.block_size
+        is_prefix_full = bool(getattr(metadata, "is_prefix_full", False))
 
         num_seqs = len(cu_seqlens_q) - 1
         output = torch.zeros_like(q_reshaped)
@@ -91,9 +95,30 @@ class AttentionWithValidation(OriginalAttention):
             if block_size > 0:
                 qi = torch.arange(valid_q_len, device=q.device)
                 kj = torch.arange(valid_q_len, device=q.device)
-                # Kernel: ((offs_q_block // DLLM_BLOCK_SIZE + 1) * DLLM_BLOCK_SIZE)[:, None] > offs_kv_block[None, :]
-                block_ends = ((qi // block_size) + 1) * block_size
-                new_kv_mask = block_ends[:, None] > kj[None, :]
+                abs_q = ctx_len + qi
+                abs_k = ctx_len + kj
+
+                if is_prefix_full:
+                    status = int(status_table[seq_id].item()) if status_table is not None else 0
+                    prefix_len = int(prefix_lens[seq_id].item()) if prefix_lens is not None else 0
+                    padded_prefix_len = int(padded_prefix_lens[seq_id].item()) if padded_prefix_lens is not None else 0
+
+                    if status == 0:
+                        pure_prefix = (qi[:, None] < prefix_len) & (kj[None, :] < prefix_len)
+                        padded_causal = (
+                            (qi[:, None] >= prefix_len)
+                            & (qi[:, None] < padded_prefix_len)
+                            & (kj[None, :] < padded_prefix_len)
+                        )
+                        block_ends = ((abs_q // block_size) + 1) * block_size
+                        block_mask_extend = (abs_k[None, :] < block_ends[:, None]) & (qi[:, None] >= padded_prefix_len)
+                        new_kv_mask = pure_prefix | padded_causal | block_mask_extend
+                    else:
+                        block_ends = ((abs_q // block_size) + 1) * block_size
+                        new_kv_mask = abs_k[None, :] < block_ends[:, None]
+                else:
+                    block_ends = ((abs_q // block_size) + 1) * block_size
+                    new_kv_mask = abs_k[None, :] < block_ends[:, None]
 
                 if ctx_len > 0:
                     cache_mask = torch.ones(valid_q_len, ctx_len, dtype=torch.bool, device=q.device)
@@ -131,4 +156,3 @@ def install_validation_hook():
     import diffulex.attention.attn_impl
     diffulex.attention.attn_impl.Attention = AttentionWithValidation
     print("[VALIDATION] Attention class replaced with validation wrapper")
-

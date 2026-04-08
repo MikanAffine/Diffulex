@@ -46,6 +46,7 @@ class KVCacheManagerBase(ABC, MultiBlockKVCacheManagerMixin):
         assert num_pages > 0
         self.config = config
         self.page_size = page_size
+        self.enable_prefix_caching = bool(getattr(config, "enable_prefix_caching", True))
         self.pages: list[Page] = [Page(page_id=i) for i in range(num_pages)]
         self.hash_to_page_id: dict[int, int] = dict()
         self.free_page_ids: deque[int] = deque(range(num_pages))
@@ -87,7 +88,7 @@ class KVCacheManagerBase(ABC, MultiBlockKVCacheManagerMixin):
         for i in range(req.num_pages):
             token_ids = req.page(i)
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.page_size else -1
-            page_id = self.hash_to_page_id.get(h, -1)
+            page_id = self.hash_to_page_id.get(h, -1) if self.enable_prefix_caching else -1
 
             if page_id == -1 or self.pages[page_id].token_ids != token_ids:
                 cache_miss = True
@@ -107,6 +108,7 @@ class KVCacheManagerBase(ABC, MultiBlockKVCacheManagerMixin):
 
             if h != -1:
                 page.update(h, token_ids)
+            if self.enable_prefix_caching and h != -1:
                 self.hash_to_page_id[h] = page_id
 
             req.page_table.append(page_id)

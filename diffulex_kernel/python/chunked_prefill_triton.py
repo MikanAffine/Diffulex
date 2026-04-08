@@ -134,105 +134,59 @@ def _chunked_prefill_attn_unified_kernel(
     l = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_DIM_PADDED], dtype=tl.float32)
 
-    # Stage 1: Attention against KV Cache
-    if PAGE_SIZE == DLLM_BLOCK_SIZE:
-        # Keep the old page-wise reduction order for equal page/block layouts.
-        offs_kv_cache_block = tl.arange(0, BLOCK_N)
-        mask_kv_cache_block = offs_kv_cache_block < PAGE_SIZE
-        num_pages = (context_len + PAGE_SIZE - 1) // PAGE_SIZE
-        for page_rel_id in range(0, num_pages):
-            page_abs_id = tl.load(
-                page_tables_ptr + req_id * page_tables_stride_nreqs + page_rel_id * page_tables_stride_pages
-            ).to(tl.int32)
-            page_token_ids = offs_kv_cache_block + page_rel_id * PAGE_SIZE
-            page_token_valid_map = (page_abs_id >= 0) & (page_token_ids < context_len) & mask_kv_cache_block
+    # Stage 1: Attention against KV Cache.
+    # Use the token-wise gather/reduction path for all page/block configurations.
+    # The old PAGE_SIZE == DLLM_BLOCK_SIZE fast path diverges from reference when
+    # context_len > 0 in cached-prefix prefill.
+    full_cache_range = tl.cdiv(context_len, BLOCK_N)
+    for cache_block_id in range(0, full_cache_range):
+        offs_kv_cache_block = cache_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
+        kv_cache_valid_map = offs_kv_cache_block < context_len
+        page_rel_ids = offs_kv_cache_block // PAGE_SIZE
+        page_abs_ids = tl.load(
+            page_tables_ptr + req_id * page_tables_stride_nreqs + page_rel_ids * page_tables_stride_pages,
+            mask=kv_cache_valid_map,
+            other=-1,
+        ).to(tl.int32)
+        page_offs = offs_kv_cache_block % PAGE_SIZE
+        page_token_valid_map = kv_cache_valid_map & (page_abs_ids >= 0)
 
-            k_offs = (
-                page_abs_id * k_cache_stride_npages
-                + offs_kv_cache_block[:, None] * k_cache_stride_psz
-                + kv_head_id * k_cache_stride_h
-                + offs_d[None, :] * k_cache_stride_d
-            )
-            k = tl.load(
-                k_cache_ptr + k_offs,
-                mask=page_token_valid_map[:, None] & mask_d[None, :],
-                other=0.0,
-            ).to(tl.bfloat16)
+        k_offs = (
+            page_abs_ids[:, None] * k_cache_stride_npages
+            + page_offs[:, None] * k_cache_stride_psz
+            + kv_head_id * k_cache_stride_h
+            + offs_d[None, :] * k_cache_stride_d
+        )
+        k = tl.load(
+            k_cache_ptr + k_offs,
+            mask=page_token_valid_map[:, None] & mask_d[None, :],
+            other=0.0,
+        ).to(tl.bfloat16)
 
-            scores = tl.dot(q, tl.trans(k)).to(tl.float32) * softmax_scale
-            scores = tl.where(mask_q_block[:, None] & page_token_valid_map[None, :], scores, float("-inf"))
+        scores = tl.dot(q, tl.trans(k)).to(tl.float32) * softmax_scale
+        scores = tl.where(mask_q_block[:, None] & page_token_valid_map[None, :], scores, float("-inf"))
 
-            m_new = tl.maximum(m, tl.max(scores, axis=1))
-            p = tl.exp(scores - m_new[:, None])
-            l_new = l * tl.exp(m - m_new) + tl.sum(p, axis=1)
-            alpha = tl.exp(m - m_new)
-            acc *= alpha[:, None]
+        m_new = tl.maximum(m, tl.max(scores, axis=1))
+        p = tl.exp(scores - m_new[:, None])
+        l_new = l * tl.exp(m - m_new) + tl.sum(p, axis=1)
+        alpha = tl.exp(m - m_new)
+        acc *= alpha[:, None]
 
-            v_offs = (
-                page_abs_id * v_cache_stride_npages
-                + offs_kv_cache_block[:, None] * v_cache_stride_psz
-                + kv_head_id * v_cache_stride_h
-                + offs_d[None, :] * v_cache_stride_d
-            )
-            v = tl.load(
-                v_cache_ptr + v_offs,
-                mask=page_token_valid_map[:, None] & mask_d[None, :],
-                other=0.0,
-            ).to(tl.bfloat16)
+        v_offs = (
+            page_abs_ids[:, None] * v_cache_stride_npages
+            + page_offs[:, None] * v_cache_stride_psz
+            + kv_head_id * v_cache_stride_h
+            + offs_d[None, :] * v_cache_stride_d
+        )
+        v = tl.load(
+            v_cache_ptr + v_offs,
+            mask=page_token_valid_map[:, None] & mask_d[None, :],
+            other=0.0,
+        ).to(tl.bfloat16)
 
-            acc += tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
-            m = m_new
-            l = l_new
-    else:
-        full_cache_range = tl.cdiv(context_len, BLOCK_N)
-        for cache_block_id in range(0, full_cache_range):
-            offs_kv_cache_block = cache_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
-            kv_cache_valid_map = offs_kv_cache_block < context_len
-            page_rel_ids = offs_kv_cache_block // PAGE_SIZE
-            page_abs_ids = tl.load(
-                page_tables_ptr + req_id * page_tables_stride_nreqs + page_rel_ids * page_tables_stride_pages,
-                mask=kv_cache_valid_map,
-                other=-1,
-            ).to(tl.int32)
-            page_offs = offs_kv_cache_block % PAGE_SIZE
-            page_token_valid_map = kv_cache_valid_map & (page_abs_ids >= 0)
-
-            k_offs = (
-                page_abs_ids[:, None] * k_cache_stride_npages
-                + page_offs[:, None] * k_cache_stride_psz
-                + kv_head_id * k_cache_stride_h
-                + offs_d[None, :] * k_cache_stride_d
-            )
-            k = tl.load(
-                k_cache_ptr + k_offs,
-                mask=page_token_valid_map[:, None] & mask_d[None, :],
-                other=0.0,
-            ).to(tl.bfloat16)
-
-            scores = tl.dot(q, tl.trans(k)).to(tl.float32) * softmax_scale
-            scores = tl.where(mask_q_block[:, None] & page_token_valid_map[None, :], scores, float("-inf"))
-
-            m_new = tl.maximum(m, tl.max(scores, axis=1))
-            p = tl.exp(scores - m_new[:, None])
-            l_new = l * tl.exp(m - m_new) + tl.sum(p, axis=1)
-            alpha = tl.exp(m - m_new)
-            acc *= alpha[:, None]
-
-            v_offs = (
-                page_abs_ids[:, None] * v_cache_stride_npages
-                + page_offs[:, None] * v_cache_stride_psz
-                + kv_head_id * v_cache_stride_h
-                + offs_d[None, :] * v_cache_stride_d
-            )
-            v = tl.load(
-                v_cache_ptr + v_offs,
-                mask=page_token_valid_map[:, None] & mask_d[None, :],
-                other=0.0,
-            ).to(tl.bfloat16)
-
-            acc += tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
-            m = m_new
-            l = l_new
+        acc += tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
+        m = m_new
+        l = l_new
 
     # Stage 2: Attention against new KV
     kv_start = q_start

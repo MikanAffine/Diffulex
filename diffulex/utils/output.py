@@ -29,6 +29,8 @@ class ReqStep:
 
     block_size: int
     buffer_bids: list[int]
+    kv_mapping_trace: dict | None = None
+    sampler_trace: dict | None = None
 
     def to_dict(self) -> dict:
         return dict(
@@ -39,6 +41,8 @@ class ReqStep:
             running_token_ids=self.running_token_ids,
             block_size=self.block_size,
             buffer_bids=self.buffer_bids,
+            kv_mapping_trace=self.kv_mapping_trace,
+            sampler_trace=self.sampler_trace,
         )
 
 
@@ -55,6 +59,7 @@ class ReqTrajectory:
     max_nfe_reached: bool
     max_repetition_run_reached: bool
     eos_token_generated: bool
+    completion_reason: str | None = None
 
     text: str = None
     # Generation-only tokens including content after EOS (when applicable); see DllmReq.full_response.
@@ -72,6 +77,7 @@ class ReqTrajectory:
             max_nfe_reached=self.max_nfe_reached,
             max_repetition_run_reached=self.max_repetition_run_reached,
             eos_token_generated=self.eos_token_generated,
+            completion_reason=self.completion_reason,
             text=self.text,
         )
 
@@ -91,6 +97,7 @@ class GenerationOutputs:
                 max_nfe_reached=False,
                 max_repetition_run_reached=False,
                 eos_token_generated=False,
+                completion_reason=None,
             )
             for req_id in range(num_prompts)
         ]
@@ -188,6 +195,8 @@ class GenerationOutputs:
                     ),
                     block_size=req.block_size,
                     buffer_bids=[block.block_id for block in req.dllm_block_buffer.dllm_blocks],
+                    kv_mapping_trace=getattr(req, "_kv_mapping_trace", None),
+                    sampler_trace=getattr(req, "_sampler_trace", None),
                 )
             )
             cur_trajectory.token_ids = req.truncated_response.copy() if req.truncated_response else []
@@ -202,6 +211,7 @@ class GenerationOutputs:
             cur_trajectory.max_nfe_reached = getattr(req, "max_nfe_reached", False)
             cur_trajectory.max_repetition_run_reached = getattr(req, "max_repetition_run_reached", False)
             cur_trajectory.eos_token_generated = req.eos_token_generated
+            cur_trajectory.completion_reason = getattr(req, "completion_reason", None)
 
     def postfix(self) -> dict:
         return dict(
