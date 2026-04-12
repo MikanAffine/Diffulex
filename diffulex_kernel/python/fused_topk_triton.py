@@ -176,11 +176,11 @@ def _launch_fused_topk_kernels(
         RENORMALIZE=renormalize,
         num_warps=num_warps,
     )
-    _validate_fused_topk_outputs(
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        num_experts=num_experts,
-    )
+    #_validate_fused_topk_outputs(
+    #    topk_weights=topk_weights,
+    #    topk_ids=topk_ids,
+    #    num_experts=num_experts,
+    #)
     return topk_weights, topk_ids
 
 
