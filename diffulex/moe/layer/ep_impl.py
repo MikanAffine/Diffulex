@@ -8,7 +8,6 @@ from diffulex.layer.linear import ReplicatedLinear, divide
 from diffulex.moe.layer.base import FusedMoE
 from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
 from diffulex.utils.parallelism import get_ep_rank, get_ep_world_size
-from diffulex_kernel import fused_moe
 
 
 class EPFusedMoE(FusedMoE):
@@ -62,9 +61,141 @@ class EPFusedMoE(FusedMoE):
         local_hidden_states = flat_hidden_states[local_token_indices]
         return local_hidden_states, local_token_indices, num_tokens
 
+    @staticmethod
+    def _pack_dispatch_metadata(local_expert_ids: torch.Tensor, token_indices: torch.Tensor) -> torch.Tensor:
+        return (token_indices.to(torch.int64) << 32) | local_expert_ids.to(torch.int64)
+
+    @staticmethod
+    def _unpack_dispatch_metadata(metadata: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        token_indices = torch.bitwise_right_shift(metadata, 32).to(torch.int32)
+        local_expert_ids = torch.bitwise_and(metadata, 0xFFFFFFFF).to(torch.int32)
+        return local_expert_ids, token_indices
+
+    @staticmethod
+    def _pack_dispatch_payload(
+        hidden_states: torch.Tensor,
+        metadata: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        num_slots, hidden_size = hidden_states.shape
+        hidden_bytes = hidden_size * hidden_states.element_size()
+        metadata_bytes = metadata.element_size()
+        weight_bytes = weights.element_size()
+        payload = torch.empty(
+            (num_slots, hidden_bytes + metadata_bytes + weight_bytes),
+            device=hidden_states.device,
+            dtype=torch.uint8,
+        )
+        payload[:, :hidden_bytes].copy_(
+            hidden_states.contiguous().view(torch.uint8).reshape(num_slots, hidden_bytes)
+        )
+        offset = hidden_bytes
+        payload[:, offset : offset + metadata_bytes].copy_(
+            metadata.contiguous().view(torch.uint8).reshape(num_slots, metadata_bytes)
+        )
+        offset += metadata_bytes
+        payload[:, offset : offset + weight_bytes].copy_(
+            weights.contiguous().view(torch.uint8).reshape(num_slots, weight_bytes)
+        )
+        return payload
+
+    @staticmethod
+    def _unpack_dispatch_payload(
+        payload: torch.Tensor,
+        *,
+        hidden_size: int,
+        hidden_dtype: torch.dtype,
+        weight_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_slots = payload.shape[0]
+        hidden_bytes = hidden_size * torch.empty((), dtype=hidden_dtype).element_size()
+        metadata_bytes = torch.empty((), dtype=torch.int64).element_size()
+        weight_bytes = torch.empty((), dtype=weight_dtype).element_size()
+
+        hidden_states = payload[:, :hidden_bytes].contiguous().view(hidden_dtype).reshape(num_slots, hidden_size)
+        offset = hidden_bytes
+        metadata = payload[:, offset : offset + metadata_bytes].contiguous().view(torch.int64).reshape(num_slots)
+        offset += metadata_bytes
+        weights = payload[:, offset : offset + weight_bytes].contiguous().view(weight_dtype).reshape(num_slots)
+        return hidden_states, metadata, weights
+
+    @staticmethod
+    def _pack_return_payload(
+        outputs: torch.Tensor,
+        token_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        num_slots, hidden_size = outputs.shape
+        hidden_bytes = hidden_size * outputs.element_size()
+        token_bytes = token_indices.element_size()
+        payload = torch.empty(
+            (num_slots, hidden_bytes + token_bytes),
+            device=outputs.device,
+            dtype=torch.uint8,
+        )
+        payload[:, :hidden_bytes].copy_(
+            outputs.contiguous().view(torch.uint8).reshape(num_slots, hidden_bytes)
+        )
+        payload[:, hidden_bytes : hidden_bytes + token_bytes].copy_(
+            token_indices.contiguous().view(torch.uint8).reshape(num_slots, token_bytes)
+        )
+        return payload
+
+    @staticmethod
+    def _unpack_return_payload(
+        payload: torch.Tensor,
+        *,
+        hidden_size: int,
+        hidden_dtype: torch.dtype,
+        token_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_slots = payload.shape[0]
+        hidden_bytes = hidden_size * torch.empty((), dtype=hidden_dtype).element_size()
+        token_bytes = torch.empty((), dtype=token_dtype).element_size()
+        outputs = payload[:, :hidden_bytes].contiguous().view(hidden_dtype).reshape(num_slots, hidden_size)
+        token_indices = payload[:, hidden_bytes : hidden_bytes + token_bytes].contiguous().view(token_dtype).reshape(
+            num_slots
+        )
+        return outputs, token_indices
+
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        phase = self.get_current_phase()
+        if phase == "prefill":
+            return self._forward_replicated(hidden_states)
+        if phase == "decode":
+            #return self._forward_a2a(hidden_states)
+            # a2a performance is worse now
+            return self._forward_replicated(hidden_states)
+        return self._forward_replicated(hidden_states)
+
+    def _forward_replicated(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         original_shape = hidden_states.shape
-        flat_hidden_states = hidden_states.reshape(-1, original_shape[-1]).contiguous()
+        flat_hidden_states = hidden_states.reshape(-1, original_shape[-1])
+
+        router_logits = self.gate(flat_hidden_states)
+        topk_output = self.router(router_logits)
+        topk_weights = topk_output.weights
+        topk_ids = topk_output.ids
+
+        final_hidden_states = self.expert_gemm(
+            impl="triton",
+            hidden_states=flat_hidden_states,
+            w13=self.w13,
+            w2=self.w2,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            local_expert_start=self.local_expert_start,
+            hidden_act=self.hidden_act,
+        )
+        dist.all_reduce(final_hidden_states)
+
+        return final_hidden_states.reshape(original_shape), router_logits
+
+    def _a2a_dispatch_tokens(
+        self,
+        flat_hidden_states: torch.Tensor,
+        topk_ids_global: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> dict[str, torch.Tensor | list[int] | int]:
         device = flat_hidden_states.device
         dtype = flat_hidden_states.dtype
 
@@ -73,262 +204,121 @@ class EPFusedMoE(FusedMoE):
         ep_size = self.ep_size
         top_k = self.top_k
 
-        if num_tokens == 0:
-            return flat_hidden_states.reshape(original_shape), None
-
-        # ------------------------------------------------------------------
-        # 1) shard tokens: rank r owns token indices [r, r + ep_size, ...]
-        # ------------------------------------------------------------------
         global_token_indices = torch.arange(num_tokens, device=device, dtype=torch.int32)
         local_token_indices = global_token_indices[ep_rank::ep_size].contiguous()
-        local_hidden_states = flat_hidden_states[local_token_indices].contiguous()  # [T_local, H]
+        local_hidden_states = flat_hidden_states[local_token_indices].contiguous()
         num_local_tokens = local_hidden_states.shape[0]
 
-        # ------------------------------------------------------------------
-        # 2) local gate/topk on GLOBAL experts
-        #    NOTE: self.gate must output self.num_experts, not self.num_local_experts
-        # ------------------------------------------------------------------
-        router_logits_local = self.gate(local_hidden_states)  # [T_local, num_experts]
-        topk_output = self.router(router_logits_local)
-        topk_weights = topk_output.weights
-        topk_ids_global = topk_output.ids
-        topk_ids_global = topk_ids_global.to(torch.int32).contiguous()
-        topk_weights = topk_weights.contiguous()
-
-        # ------------------------------------------------------------------
-        # 3) flatten [T_local, K] => slot-major [S]
-        # ------------------------------------------------------------------
         num_slots = num_local_tokens * top_k
-
-        slot_hidden_states = local_hidden_states.repeat_interleave(top_k, dim=0).contiguous()  # [S, H]
+        slot_hidden_states = local_hidden_states.repeat_interleave(top_k, dim=0).contiguous()
         slot_token_indices = (
             local_token_indices.unsqueeze(1)
             .expand(num_local_tokens, top_k)
             .reshape(-1)
             .contiguous()
-        )  # [S]
+        )
+        slot_expert_ids_global = topk_ids_global.reshape(-1).contiguous()
+        slot_weights = topk_weights.reshape(-1).contiguous()
 
-        slot_topk_indices = (
-            torch.arange(top_k, device=device, dtype=torch.int32)
-            .unsqueeze(0)
-            .expand(num_local_tokens, top_k)
-            .reshape(-1)
-            .contiguous()
-        )  # [S]
-
-        slot_expert_ids_global = topk_ids_global.reshape(-1).contiguous()   # [S]
-        slot_weights = topk_weights.reshape(-1).contiguous()                # [S]
-
-        # global expert id -> dst rank / local expert id
         dst_rank = torch.div(
             slot_expert_ids_global,
             self.num_local_experts,
             rounding_mode="floor",
-        ).to(torch.int32)  # [S]
+        ).to(torch.int32)
         dst_local_expert = (
             slot_expert_ids_global - dst_rank * self.num_local_experts
-        ).to(torch.int32).contiguous()  # [S]
+        ).to(torch.int32).contiguous()
 
-        # ------------------------------------------------------------------
-        # 4) sort send payload by dst_rank so we can all_to_all_single
-        # ------------------------------------------------------------------
         sort_idx = torch.argsort(dst_rank)
         dst_rank_sorted = dst_rank[sort_idx]
         send_hidden_states = slot_hidden_states[sort_idx].contiguous()
         send_local_expert = dst_local_expert[sort_idx].contiguous()
         send_token_indices = slot_token_indices[sort_idx].contiguous()
-        send_topk_indices = slot_topk_indices[sort_idx].contiguous()
         send_weights = slot_weights[sort_idx].contiguous()
-        send_src_rank = torch.full(
-            (num_slots,),
-            ep_rank,
-            device=device,
-            dtype=torch.int32,
-        )
+        send_metadata = self._pack_dispatch_metadata(send_local_expert, send_token_indices).contiguous()
+        send_payload = self._pack_dispatch_payload(send_hidden_states, send_metadata, send_weights)
 
-        # count sends to each dst rank
         send_counts = torch.bincount(dst_rank_sorted.to(torch.int64), minlength=ep_size).to(torch.int32)
-
-        # exchange counts first
         recv_counts = torch.empty_like(send_counts)
         dist.all_to_all_single(recv_counts, send_counts)
 
-        send_counts_cpu = send_counts.cpu()
-        recv_counts_cpu = recv_counts.cpu()
-
-        send_splits = send_counts_cpu.tolist()
-        recv_splits = recv_counts_cpu.tolist()
-
+        send_splits = send_counts.cpu().tolist()
+        recv_splits = recv_counts.cpu().tolist()
         total_recv_slots = int(recv_counts.sum().item())
-
-        # recv buffers
-        recv_hidden_states = torch.empty(
-            (total_recv_slots, hidden_size),
+        payload_width = send_payload.shape[1]
+        recv_payload = torch.empty(
+            (total_recv_slots, payload_width),
             device=device,
+            dtype=torch.uint8,
+        )
+
+        dist.all_to_all_single(
+            recv_payload,
+            send_payload,
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+        )
+        recv_hidden_states, recv_metadata, recv_weights = self._unpack_dispatch_payload(
+            recv_payload,
+            hidden_size=hidden_size,
+            hidden_dtype=dtype,
+            weight_dtype=topk_weights.dtype,
+        )
+        recv_local_expert, recv_token_indices = self._unpack_dispatch_metadata(recv_metadata)
+
+        return dict(
+            num_tokens=num_tokens,
+            hidden_size=hidden_size,
             dtype=dtype,
-        )
-        recv_local_expert = torch.empty(
-            (total_recv_slots,),
             device=device,
-            dtype=torch.int32,
-        )
-        recv_token_indices = torch.empty(
-            (total_recv_slots,),
-            device=device,
-            dtype=torch.int32,
-        )
-        recv_topk_indices = torch.empty(
-            (total_recv_slots,),
-            device=device,
-            dtype=torch.int32,
-        )
-        recv_weights = torch.empty(
-            (total_recv_slots,),
-            device=device,
-            dtype=topk_weights.dtype,
-        )
-        recv_src_rank = torch.empty(
-            (total_recv_slots,),
-            device=device,
-            dtype=torch.int32,
+            num_local_tokens=num_local_tokens,
+            local_token_indices=local_token_indices,
+            send_splits=send_splits,
+            recv_splits=recv_splits,
+            recv_hidden_states=recv_hidden_states,
+            recv_local_expert=recv_local_expert,
+            recv_token_indices=recv_token_indices,
+            recv_weights=recv_weights,
+            total_recv_slots=total_recv_slots,
         )
 
-        # dispatch A2A
-        dist.all_to_all_single(
-            recv_hidden_states,
-            send_hidden_states,
-            output_split_sizes=recv_splits,
-            input_split_sizes=send_splits,
-        )
-        dist.all_to_all_single(
-            recv_local_expert,
-            send_local_expert,
-            output_split_sizes=recv_splits,
-            input_split_sizes=send_splits,
-        )
-        dist.all_to_all_single(
-            recv_token_indices,
-            send_token_indices,
-            output_split_sizes=recv_splits,
-            input_split_sizes=send_splits,
-        )
-        dist.all_to_all_single(
-            recv_topk_indices,
-            send_topk_indices,
-            output_split_sizes=recv_splits,
-            input_split_sizes=send_splits,
-        )
-        dist.all_to_all_single(
-            recv_weights,
-            send_weights,
-            output_split_sizes=recv_splits,
-            input_split_sizes=send_splits,
-        )
-        dist.all_to_all_single(
-            recv_src_rank,
-            send_src_rank,
-            output_split_sizes=recv_splits,
-            input_split_sizes=send_splits,
-        )
-
-        # ------------------------------------------------------------------
-        # 5) local expert compute on received slots
-        #    Adapt current expert_gemm API by using top_k=1
-        # ------------------------------------------------------------------
-        if total_recv_slots > 0:
-            recv_topk_ids_local = recv_local_expert[:, None].contiguous()  # [R, 1]
-            recv_topk_weights_local = torch.ones(
-                (total_recv_slots, 1),
-                device=device,
-                dtype=topk_weights.dtype,
-            )
-            recv_slot_outputs = self.expert_gemm(
-                impl="triton",
-                hidden_states=recv_hidden_states,
-                w13=self.w13,
-                w2=self.w2,
-                topk_ids=recv_topk_ids_local,
-                topk_weights=recv_topk_weights_local,
-                local_expert_start=0,
-                hidden_act=self.hidden_act,
-            ).contiguous()  # [R, H]
-        else:
-            recv_slot_outputs = torch.empty((0, hidden_size), device=device, dtype=dtype)
-
-        # ------------------------------------------------------------------
-        # 6) send outputs back to source rank (combine A2A)
-        # ------------------------------------------------------------------
-        # sort by src rank
-        back_sort_idx = torch.argsort(recv_src_rank)
-        back_dst_rank_sorted = recv_src_rank[back_sort_idx]
-
-        send_back_outputs = recv_slot_outputs[back_sort_idx].contiguous()
-        send_back_token_indices = recv_token_indices[back_sort_idx].contiguous()
-        send_back_topk_indices = recv_topk_indices[back_sort_idx].contiguous()
-        send_back_weights = recv_weights[back_sort_idx].contiguous()
-
-        send_back_counts = torch.bincount(
-            back_dst_rank_sorted.to(torch.int64),
-            minlength=ep_size,
-        ).to(torch.int32)
-
-        recv_back_counts = torch.empty_like(send_back_counts)
-        dist.all_to_all_single(recv_back_counts, send_back_counts)
-
-        send_back_splits = send_back_counts.cpu().tolist()
-        recv_back_splits = recv_back_counts.cpu().tolist()
-        total_returned_slots = int(recv_back_counts.sum().item())
-
-        returned_outputs = torch.empty(
-            (total_returned_slots, hidden_size),
+    def _a2a_combine_tokens(
+        self,
+        recv_slot_outputs: torch.Tensor,
+        dispatch_ctx: dict[str, torch.Tensor | list[int] | int],
+    ) -> torch.Tensor:
+        device = dispatch_ctx["device"]
+        dtype = dispatch_ctx["dtype"]
+        hidden_size = int(dispatch_ctx["hidden_size"])
+        num_tokens = int(dispatch_ctx["num_tokens"])
+        num_local_tokens = int(dispatch_ctx["num_local_tokens"])
+        local_token_indices = dispatch_ctx["local_token_indices"]
+        send_splits = dispatch_ctx["send_splits"]
+        recv_splits = dispatch_ctx["recv_splits"]
+        recv_token_indices = dispatch_ctx["recv_token_indices"]
+        send_back_splits = recv_splits
+        recv_back_splits = send_splits
+        total_returned_slots = int(sum(recv_back_splits))
+        send_back_payload = self._pack_return_payload(recv_slot_outputs, recv_token_indices)
+        returned_payload = torch.empty(
+            (total_returned_slots, send_back_payload.shape[1]),
             device=device,
-            dtype=dtype,
-        )
-        returned_token_indices = torch.empty(
-            (total_returned_slots,),
-            device=device,
-            dtype=torch.int32,
-        )
-        returned_topk_indices = torch.empty(
-            (total_returned_slots,),
-            device=device,
-            dtype=torch.int32,
-        )
-        returned_weights = torch.empty(
-            (total_returned_slots,),
-            device=device,
-            dtype=topk_weights.dtype,
+            dtype=torch.uint8,
         )
 
         dist.all_to_all_single(
-            returned_outputs,
-            send_back_outputs,
+            returned_payload,
+            send_back_payload,
             output_split_sizes=recv_back_splits,
             input_split_sizes=send_back_splits,
         )
-        dist.all_to_all_single(
-            returned_token_indices,
-            send_back_token_indices,
-            output_split_sizes=recv_back_splits,
-            input_split_sizes=send_back_splits,
-        )
-        dist.all_to_all_single(
-            returned_topk_indices,
-            send_back_topk_indices,
-            output_split_sizes=recv_back_splits,
-            input_split_sizes=send_back_splits,
-        )
-        dist.all_to_all_single(
-            returned_weights,
-            send_back_weights,
-            output_split_sizes=recv_back_splits,
-            input_split_sizes=send_back_splits,
+        returned_outputs, returned_token_indices = self._unpack_return_payload(
+            returned_payload,
+            hidden_size=hidden_size,
+            hidden_dtype=dtype,
+            token_dtype=torch.int32,
         )
 
-        # ------------------------------------------------------------------
-        # 7) combine on token-owner rank
-        #    owner rank only owns local_token_indices
-        # ------------------------------------------------------------------
         local_final_hidden_states = torch.zeros(
             (num_local_tokens, hidden_size),
             device=device,
@@ -336,36 +326,26 @@ class EPFusedMoE(FusedMoE):
         )
 
         if total_returned_slots > 0:
-            # token indices owned by this rank are exactly:
-            # ep_rank, ep_rank + ep_size, ep_rank + 2*ep_size, ...
-            # so inverse mapping is (token_idx - ep_rank) // ep_size
             local_positions = torch.div(
-                returned_token_indices - ep_rank,
-                ep_size,
+                returned_token_indices - self.ep_rank,
+                self.ep_size,
                 rounding_mode="floor",
             ).to(torch.int64)
 
-            weighted_outputs = returned_outputs.float() * returned_weights.unsqueeze(-1).float()
-            local_final_hidden_states.index_add_(0, local_positions, weighted_outputs)
+            local_final_hidden_states.index_add_(0, local_positions, returned_outputs.float())
 
         local_final_hidden_states = local_final_hidden_states.to(dtype).contiguous()
 
-        # ------------------------------------------------------------------
-        # 8) restore replicated-token semantics after MoE
-        #    gather all local token shards and scatter into full [T, H] on every rank
-        # ------------------------------------------------------------------
         local_token_count = torch.tensor(
             [num_local_tokens],
             device=device,
             dtype=torch.int64,
         )
-        gathered_counts = [torch.zeros_like(local_token_count) for _ in range(ep_size)]
+        gathered_counts = [torch.zeros_like(local_token_count) for _ in range(self.ep_size)]
         dist.all_gather(gathered_counts, local_token_count)
         gathered_counts = [int(x.item()) for x in gathered_counts]
 
-        
         max_local_tokens = max(gathered_counts)
-        # pad token indices
         padded_local_token_indices = torch.full(
             (max_local_tokens,),
             fill_value=-1,
@@ -373,7 +353,6 @@ class EPFusedMoE(FusedMoE):
             dtype=torch.int32,
         )
         padded_local_token_indices[:num_local_tokens] = local_token_indices.contiguous()
-        # pad outputs
         padded_local_outputs = torch.zeros(
             (max_local_tokens, hidden_size),
             device=device,
@@ -397,7 +376,7 @@ class EPFusedMoE(FusedMoE):
             dtype=dtype,
         )
 
-        for rank in range(ep_size):
+        for rank in range(self.ep_size):
             cnt = gathered_counts[rank]
             if cnt == 0:
                 continue
@@ -405,6 +384,58 @@ class EPFusedMoE(FusedMoE):
             out = gathered_outputs[rank][:cnt]
             final_hidden_states[idx] = out
 
+        return final_hidden_states
+
+    def _forward_a2a(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        original_shape = hidden_states.shape
+        flat_hidden_states = hidden_states.reshape(-1, original_shape[-1])
+
+        num_tokens = flat_hidden_states.shape[0]
+
+        if num_tokens == 0:
+            return flat_hidden_states.reshape(original_shape), None
+
+        local_hidden_states, _local_token_indices, _ = self.shard_tokens(flat_hidden_states)
+        router_logits_local = self.gate(local_hidden_states)  # [T_local, num_experts]
+        topk_output = self.router(router_logits_local)
+        topk_weights = topk_output.weights
+        topk_ids_global = topk_output.ids
+
+        dispatch_ctx = self._a2a_dispatch_tokens(
+            flat_hidden_states=flat_hidden_states,
+            topk_ids_global=topk_ids_global,
+            topk_weights=topk_weights,
+        )
+
+        total_recv_slots = int(dispatch_ctx["total_recv_slots"])
+        recv_hidden_states = dispatch_ctx["recv_hidden_states"]
+        recv_local_expert = dispatch_ctx["recv_local_expert"]
+        if total_recv_slots > 0:
+            recv_topk_ids_local = recv_local_expert[:, None].contiguous()  # [R, 1]
+            recv_topk_weights_local = torch.ones(
+                (total_recv_slots, 1),
+                device=recv_hidden_states.device,
+                dtype=topk_weights.dtype,
+            )
+            recv_slot_outputs = self.expert_gemm(
+                impl="triton",
+                hidden_states=recv_hidden_states,
+                w13=self.w13,
+                w2=self.w2,
+                topk_ids=recv_topk_ids_local,
+                topk_weights=recv_topk_weights_local,
+                local_expert_start=0,
+                hidden_act=self.hidden_act,
+            ).contiguous()  # [R, H]
+            recv_slot_outputs.mul_(dispatch_ctx["recv_weights"].to(recv_slot_outputs.dtype).unsqueeze(-1))
+        else:
+            recv_slot_outputs = torch.empty(
+                (0, int(dispatch_ctx["hidden_size"])),
+                device=dispatch_ctx["device"],
+                dtype=dispatch_ctx["dtype"],
+            )
+
+        final_hidden_states = self._a2a_combine_tokens(recv_slot_outputs, dispatch_ctx)
         return final_hidden_states.reshape(original_shape), None
     
     def owns_global_expert(self, expert_idx: int) -> bool:
