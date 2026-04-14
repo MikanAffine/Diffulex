@@ -12,9 +12,13 @@ SRAM, which matches the common MoE inference case (tens to low hundreds of
 experts) and keeps the draft readable.
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
+
+ENABLE_FUSED_TOPK_DEBUG = os.getenv("DIFFULEX_DEBUG_FUSED_TOPK", "0") == "1"
 
 
 def _validate_fused_topk_inputs(
@@ -80,6 +84,7 @@ def _fused_topk(
 ):
     pid = tl.program_id(0)
     offs = tl.arange(0, BLOCK_SIZE)
+    topk_offs = tl.arange(0, TOP_K)
     mask = offs < num_experts
 
     logits = tl.load(
@@ -90,40 +95,43 @@ def _fused_topk(
     logits = tl.where(logits == logits, logits, -1.0e20)
     logits = tl.maximum(tl.minimum(logits, 1.0e20), -1.0e20)
     logits = tl.where(mask, logits, -1.0e20)
-
-    if SCORING_MODE == 0:
-        row_max = tl.max(logits, axis=0)
-        exp_logits = tl.exp(logits - row_max)
-        exp_logits = tl.where(mask, exp_logits, 0.0)
-        row_denom = tl.sum(exp_logits, axis=0)
-        scores = exp_logits / row_denom
-    else:
-        scores = 1.0 / (1.0 + tl.exp(-logits))
-        scores = tl.where(mask, scores, 0.0)
-
-    scores = tl.where(mask, scores, -1.0e20)
-    selected_sum = tl.zeros((), dtype=tl.float32)
+    search_logits = logits
+    selected_logits = tl.full((TOP_K,), -1.0e20, dtype=tl.float32)
+    selected_ids = tl.zeros((TOP_K,), dtype=tl.int32)
 
     for topk_idx in range(TOP_K):
-        best_id = tl.argmax(scores, axis=0).to(tl.int32)
-        best_score = tl.max(scores, axis=0)
+        best_id = tl.argmax(search_logits, axis=0).to(tl.int32)
+        best_logit = tl.max(search_logits, axis=0)
+        selected_logits = tl.where(topk_offs == topk_idx, best_logit, selected_logits)
+        selected_ids = tl.where(topk_offs == topk_idx, best_id, selected_ids)
+        search_logits = tl.where(offs == best_id, -1.0e20, search_logits)
 
-        tl.store(
-            weights_ptr + pid * stride_out_m + topk_idx * stride_out_k,
-            best_score,
-        )
-        tl.store(
-            ids_ptr + pid * stride_out_m + topk_idx * stride_out_k,
-            best_id,
-        )
-        selected_sum += best_score
-        scores = tl.where(offs == best_id, -1.0e20, scores)
+    if SCORING_MODE == 0:
+        if RENORMALIZE:
+            selected_max = tl.max(selected_logits, axis=0)
+            selected_weights = tl.exp(selected_logits - selected_max)
+            selected_denom = tl.maximum(tl.sum(selected_weights, axis=0), 1e-20)
+            selected_weights = selected_weights / selected_denom
+        else:
+            row_max = selected_logits[0]
+            exp_logits = tl.exp(logits - row_max)
+            exp_logits = tl.where(mask, exp_logits, 0.0)
+            row_denom = tl.maximum(tl.sum(exp_logits, axis=0), 1e-20)
+            selected_weights = tl.exp(selected_logits - row_max) / row_denom
+    else:
+        selected_weights = 1.0 / (1.0 + tl.exp(-selected_logits))
+        if RENORMALIZE:
+            selected_denom = tl.maximum(tl.sum(selected_weights, axis=0), 1e-20)
+            selected_weights = selected_weights / selected_denom
 
-    if RENORMALIZE:
-        selected_sum = tl.maximum(selected_sum, 1e-20)
-        for topk_idx in range(TOP_K):
-            weight_ptr = weights_ptr + pid * stride_out_m + topk_idx * stride_out_k
-            tl.store(weight_ptr, tl.load(weight_ptr) / selected_sum)
+    tl.store(
+        weights_ptr + pid * stride_out_m + topk_offs * stride_out_k,
+        selected_weights,
+    )
+    tl.store(
+        ids_ptr + pid * stride_out_m + topk_offs * stride_out_k,
+        selected_ids,
+    )
 
 
 def _launch_fused_topk_kernels(
@@ -149,6 +157,8 @@ def _launch_fused_topk_kernels(
         dtype=torch.int32,
         device=router_logits.device,
     )
+    if num_tokens == 0:
+        return topk_weights, topk_ids
 
     block_size = triton.next_power_of_2(num_experts)
     num_warps = 4
@@ -176,11 +186,12 @@ def _launch_fused_topk_kernels(
         RENORMALIZE=renormalize,
         num_warps=num_warps,
     )
-    #_validate_fused_topk_outputs(
-    #    topk_weights=topk_weights,
-    #    topk_ids=topk_ids,
-    #    num_experts=num_experts,
-    #)
+    if ENABLE_FUSED_TOPK_DEBUG:
+        _validate_fused_topk_outputs(
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            num_experts=num_experts,
+        )
     return topk_weights, topk_ids
 
 

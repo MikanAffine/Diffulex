@@ -55,6 +55,7 @@ class PackedMoEInputs:
     expert_block_ids: torch.Tensor
     num_valid_slots: int
     num_padded_slots: int
+    single_slot_per_token: bool
 
 
 def _validate_fused_moe_inputs(
@@ -279,47 +280,46 @@ def _pack_fused_moe_inputs(
     num_local_experts: int,
     local_expert_start: int,
     block_m: int,
+    topk_ids_are_local: bool,
 ) -> PackedMoEInputs:
     num_tokens, hidden_size = hidden_states.shape
     del hidden_size
     top_k = topk_ids.shape[1]
+    device = hidden_states.device
+    flat_token_ids = torch.arange(num_tokens * top_k, device=device, dtype=torch.int32)
+    flat_token_ids = torch.div(flat_token_ids, top_k, rounding_mode="floor")
+    flat_weights = topk_weights.reshape(-1)
 
-    local_ids = topk_ids.to(torch.int32) - int(local_expert_start)
-    local_mask = (local_ids >= 0) & (local_ids < num_local_experts)
-    flat_valid_mask = local_mask.reshape(-1)
+    if topk_ids_are_local:
+        valid_local_ids = topk_ids.to(torch.int32).reshape(-1)
+        valid_token_ids = flat_token_ids
+        valid_weights = flat_weights
+    else:
+        flat_local_ids = topk_ids.to(torch.int32).reshape(-1) - int(local_expert_start)
+        flat_valid_mask = (flat_local_ids >= 0) & (flat_local_ids < num_local_experts)
+        valid_local_ids = flat_local_ids[flat_valid_mask]
+        valid_token_ids = flat_token_ids[flat_valid_mask]
+        valid_weights = flat_weights[flat_valid_mask]
 
-    if not bool(flat_valid_mask.any().item()):
-        empty_i32 = torch.empty((0,), device=hidden_states.device, dtype=torch.int32)
-        empty_w = torch.empty((0,), device=hidden_states.device, dtype=topk_weights.dtype)
+    num_valid_slots = valid_local_ids.numel()
+    if num_valid_slots == 0:
+        empty_i32 = torch.empty((0,), device=device, dtype=torch.int32)
+        empty_w = torch.empty((0,), device=device, dtype=topk_weights.dtype)
         return PackedMoEInputs(
             packed_token_ids=empty_i32,
             packed_weights=empty_w,
             expert_block_ids=empty_i32,
             num_valid_slots=0,
             num_padded_slots=0,
+            single_slot_per_token=(top_k == 1),
         )
 
-    flat_local_ids = local_ids.reshape(-1)
-    flat_token_ids = (
-        torch.arange(num_tokens, device=hidden_states.device, dtype=torch.int32)
-        .unsqueeze(1)
-        .expand(num_tokens, top_k)
-        .reshape(-1)
-    )
-    flat_weights = topk_weights.reshape(-1)
-
-    valid_local_ids = flat_local_ids[flat_valid_mask]
-    valid_token_ids = flat_token_ids[flat_valid_mask]
-    valid_weights = flat_weights[flat_valid_mask]
-
-    sort_order = torch.argsort(valid_local_ids)
-    sorted_local_ids = valid_local_ids[sort_order]
+    sorted_local_ids, sort_order = torch.sort(valid_local_ids)
     sorted_token_ids = valid_token_ids[sort_order]
     sorted_weights = valid_weights[sort_order]
 
     counts = torch.bincount(sorted_local_ids.to(torch.int64), minlength=num_local_experts)
     padded_counts = ((counts + block_m - 1) // block_m) * block_m
-    num_valid_slots = int(sorted_local_ids.numel())
     num_padded_slots = int(padded_counts.sum().item())
     num_expert_blocks = num_padded_slots // block_m
 
@@ -327,61 +327,68 @@ def _pack_fused_moe_inputs(
         "packed_token_ids",
         (num_padded_slots,),
         dtype=torch.int32,
-        device=hidden_states.device,
+        device=device,
         fill_value=-1,
     )
     packed_weights = _get_workspace_tensor(
         "packed_weights",
         (num_padded_slots,),
         dtype=topk_weights.dtype,
-        device=hidden_states.device,
+        device=device,
         zero=True,
     )
     expert_block_ids = _get_workspace_tensor(
         "expert_block_ids",
         (num_expert_blocks,),
         dtype=torch.int32,
-        device=hidden_states.device,
+        device=device,
     )
     offsets = _get_workspace_tensor(
         "expert_offsets",
         (num_local_experts,),
         dtype=torch.int64,
-        device=hidden_states.device,
+        device=device,
     )
     dst_positions = _get_workspace_tensor(
         "dst_positions",
         (num_valid_slots,),
         dtype=torch.int64,
-        device=hidden_states.device,
+        device=device,
     )
 
     offsets.copy_(torch.cumsum(padded_counts.to(torch.int64), dim=0) - padded_counts.to(torch.int64))
     expert_block_ids.copy_(
         torch.repeat_interleave(
-            torch.arange(num_local_experts, device=hidden_states.device, dtype=torch.int32),
+            torch.arange(num_local_experts, device=device, dtype=torch.int32),
             (padded_counts // block_m).to(torch.int64),
             output_size=num_expert_blocks,
         )
     )
 
-    segment_start_flags = _get_workspace_tensor(
-        "segment_start_flags",
+    slot_indices = _get_workspace_tensor(
+        "slot_indices",
         (num_valid_slots,),
-        dtype=torch.bool,
-        device=hidden_states.device,
+        dtype=torch.int64,
+        device=device,
     )
-    segment_start_flags.fill_(False)
-    segment_start_flags[0] = True
-    segment_start_flags[1:] = sorted_local_ids[1:] != sorted_local_ids[:-1]
-    segment_starts = torch.nonzero(segment_start_flags, as_tuple=False).flatten().to(torch.int64)
-    repeated_starts = torch.repeat_interleave(
-        segment_starts,
-        counts[counts > 0].to(torch.int64),
-        output_size=num_valid_slots,
+    slot_indices.copy_(torch.arange(num_valid_slots, device=device, dtype=torch.int64))
+    segment_start_positions = _get_workspace_tensor(
+        "segment_start_positions",
+        (num_valid_slots,),
+        dtype=torch.int64,
+        device=device,
+        zero=True,
     )
-    dst_positions.copy_(torch.arange(num_valid_slots, device=hidden_states.device, dtype=torch.int64))
-    dst_positions.sub_(repeated_starts)
+    segment_start_positions[0] = 0
+    if num_valid_slots > 1:
+        segment_start_positions[1:] = torch.where(
+            sorted_local_ids[1:] != sorted_local_ids[:-1],
+            slot_indices[1:],
+            torch.zeros_like(slot_indices[1:]),
+        )
+    segment_start_positions = torch.cummax(segment_start_positions, dim=0).values
+    dst_positions.copy_(slot_indices)
+    dst_positions.sub_(segment_start_positions)
     dst_positions.add_(offsets[sorted_local_ids.to(torch.int64)])
 
     packed_token_ids[dst_positions] = sorted_token_ids
@@ -393,6 +400,7 @@ def _pack_fused_moe_inputs(
         expert_block_ids=expert_block_ids,
         num_valid_slots=num_valid_slots,
         num_padded_slots=num_padded_slots,
+        single_slot_per_token=(top_k == 1),
     )
 
 
@@ -506,6 +514,14 @@ def _combine_packed_moe_outputs(
     if packed_inputs.num_valid_slots == 0:
         return combined_output.to(packed_slot_outputs.dtype)
 
+    if packed_inputs.single_slot_per_token:
+        valid_rows = packed_inputs.packed_token_ids >= 0
+        valid_token_ids = packed_inputs.packed_token_ids[valid_rows].to(torch.int64)
+        valid_outputs = packed_slot_outputs[valid_rows].to(torch.float32)
+        valid_weights = packed_inputs.packed_weights[valid_rows].to(torch.float32).unsqueeze(-1)
+        combined_output[valid_token_ids] = valid_outputs * valid_weights
+        return combined_output.to(packed_slot_outputs.dtype)
+
     block_m = PACKED_BLOCK_M
     block_n = 64 if packed_slot_outputs.shape[1] >= 64 else triton.next_power_of_2(packed_slot_outputs.shape[1])
     _weighted_scatter_add[
@@ -539,6 +555,7 @@ def _launch_fused_moe_kernels(
     *,
     local_expert_start: int,
     hidden_act: str,
+    topk_ids_are_local: bool,
 ) -> torch.Tensor:
     hidden_states = hidden_states.contiguous()
     topk_ids = topk_ids.to(torch.int32).contiguous()
@@ -568,6 +585,7 @@ def _launch_fused_moe_kernels(
         num_local_experts=num_local_experts,
         local_expert_start=local_expert_start,
         block_m=PACKED_BLOCK_M,
+        topk_ids_are_local=topk_ids_are_local,
     )
     if packed_inputs.num_valid_slots == 0:
         return hidden_states.new_zeros((num_tokens, w2.shape[1]))
@@ -607,6 +625,7 @@ def fused_moe(
     *,
     local_expert_start: int = 0,
     hidden_act: str = "silu",
+    topk_ids_are_local: bool = False,
 ) -> torch.Tensor:
     return _launch_fused_moe_kernels(
         hidden_states=hidden_states,
@@ -616,4 +635,5 @@ def fused_moe(
         topk_weights=topk_weights,
         local_expert_start=local_expert_start,
         hidden_act=hidden_act,
+        topk_ids_are_local=topk_ids_are_local,
     )

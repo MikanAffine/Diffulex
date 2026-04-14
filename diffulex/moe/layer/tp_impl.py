@@ -8,6 +8,7 @@ from diffulex.layer.linear import ReplicatedLinear, divide
 from diffulex.moe.layer.base import FusedMoE
 from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
 from diffulex.utils.parallelism import get_tp_rank, get_tp_world_size
+from diffulex_kernel import fused_moe, fused_topk
 
 
 class TPFusedMoE(FusedMoE):
@@ -49,13 +50,16 @@ class TPFusedMoE(FusedMoE):
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         original_shape = hidden_states.shape
         flat_hidden_states = hidden_states.reshape(-1, original_shape[-1])
-        
+
         router_logits = self.gate(flat_hidden_states)
-        topk_output = self.router(router_logits)
-        topk_weights = topk_output.weights
-        topk_ids = topk_output.ids
-        final_hidden_states = self.expert_gemm(
-            impl="triton",
+        topk_weights, topk_ids = fused_topk(
+            router_logits=router_logits,
+            top_k=self.topk,
+            renormalize=self.topk_renormalize,
+            scoring_func=self.topk_scoring_func,
+        )
+
+        final_hidden_states = fused_moe(
             hidden_states=flat_hidden_states,
             w13=self.w13,
             w2=self.w2,
@@ -63,6 +67,7 @@ class TPFusedMoE(FusedMoE):
             topk_weights=topk_weights,
             local_expert_start=0,
             hidden_act=self.hidden_act,
+            topk_ids_are_local=True,
         )
         dist.all_reduce(final_hidden_states)
 
