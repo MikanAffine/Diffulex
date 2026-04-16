@@ -166,6 +166,11 @@ class ModelRunnerBase(
         """Instantiate the sampler implementation; override to customize."""
         return AutoSampler.from_config(config)
 
+    def evict_sampler_state(self, req_ids: list[int] | list[str]) -> None:
+        evict_fn = getattr(self.sampler, "evict_req_states", None)
+        if evict_fn is not None:
+            evict_fn(req_ids)
+
     @abstractmethod
     def _prefill_warmup(self):
         """Run template-specific prefill warmup."""

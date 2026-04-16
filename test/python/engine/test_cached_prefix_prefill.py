@@ -7,6 +7,7 @@ from diffulex.attention.attn_impl import Attention
 from diffulex.mixin.edit.sampler import EditSamplerMixin
 from diffulex.mixin.token_merge.sampler import TokenMergeSamplerMixin
 from diffulex.sampler.auto_sampler import AutoSampler
+from diffulex.sampler.base.shift import SamplerShiftLogits
 from diffulex.sampler.dream import DreamSampler
 from diffulex.sampler.llada import LLaDASampler
 from diffulex.sampler.llada2 import LLaDA2DMaxSampler, LLaDA2Sampler, LLaDA2dot1Sampler
@@ -500,3 +501,25 @@ def test_dream_sampler_does_not_force_topk_when_prev_block_not_complete() -> Non
     accepted = sampler._compute_accepted_ids(block, confidence, initial_confidence, sampled_tokens)
 
     assert accepted.tolist() == []
+
+
+def test_shift_sampler_caches_last_logits_as_independent_tensor() -> None:
+    sampler = SamplerShiftLogits()
+    req = SimpleNamespace(req_id=7, has_to_cache_block=False)
+    logits = torch.randn(4, 8, dtype=torch.float32)
+
+    cached = sampler._fetch_last_logits(logits, req)
+
+    assert cached.shape == logits[-1].shape
+    assert cached.data_ptr() != logits[-1].data_ptr()
+
+
+def test_shift_sampler_evict_req_states_removes_cached_logits() -> None:
+    sampler = SamplerShiftLogits()
+    req = SimpleNamespace(req_id=9, has_to_cache_block=False)
+    logits = torch.randn(2, 4, dtype=torch.float32)
+    sampler._fetch_last_logits(logits, req)
+
+    assert "9" in sampler.req_last_logits_map
+    sampler.evict_req_states([9])
+    assert "9" not in sampler.req_last_logits_map

@@ -99,7 +99,7 @@ def _validate_rope_scaling(
     )
 
 
-@lru_cache(16)
+@lru_cache(1)
 def _get_rope_cached(
     head_size: int,
     rotary_dim: int,

@@ -87,6 +87,9 @@ class DiffulexTPWorker(DiffulexServingWorkerMixin):
         reqs, is_prefill = self.scheduler.schedule()
         sample_output = self.model_runner.call("run", reqs)
         self.scheduler.postprocess(reqs, sample_output)
+        finished_req_ids = [req.req_id for req in reqs if (req.is_completed or req.is_finished)]
+        if finished_req_ids:
+            self.model_runner.call("evict_sampler_state", finished_req_ids)
         return reqs, is_prefill
 
     def is_finished(self):

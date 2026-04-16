@@ -17,20 +17,28 @@ class SamplerShiftLogits(SamplerBase):
         super().__init__()
         self.req_last_logits_map: dict[str, torch.Tensor] = {}
 
+    def _cache_last_logits(self, req_id_str: str, logits_row: torch.Tensor) -> torch.Tensor:
+        # `logits_row` is often a view into a much larger logits tensor.
+        # Clone to avoid pinning the whole source storage in req_last_logits_map.
+        cached = logits_row.detach().clone()
+        self.req_last_logits_map[req_id_str] = cached
+        return cached
+
+    def evict_req_states(self, req_ids: list[int] | list[str]) -> None:
+        for req_id in req_ids:
+            self.req_last_logits_map.pop(str(req_id), None)
+
     def _fetch_last_logits(self, logits: torch.Tensor, req: DllmReq) -> torch.Tensor:
         req_id_str = str(req.req_id)
         if req.has_to_cache_block:
-            last_logits = logits[req.to_cache_last_token_id]
-            self.req_last_logits_map[req_id_str] = last_logits
-            return last_logits
+            return self._cache_last_logits(req_id_str, logits[req.to_cache_last_token_id])
 
         if req_id_str in self.req_last_logits_map:
             return self.req_last_logits_map[req_id_str]
 
         last_logits = logits[-1] if logits.shape[0] > 0 else None
         if last_logits is not None:
-            self.req_last_logits_map[req_id_str] = last_logits
-            return last_logits
+            return self._cache_last_logits(req_id_str, last_logits)
 
         raise ValueError(f"Cannot fetch last logits for req {req.req_id}: empty logits tensor")
 
