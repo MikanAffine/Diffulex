@@ -1,7 +1,7 @@
 # General information about the project.
 project = "Diffulex"
 author = "Diffulex Contributors"
-copyright = f"2025-2025, {author}"
+copyright = f"2025-2026, {author}"
 
 # Version information.
 import re
@@ -24,26 +24,9 @@ extensions = [
     "sphinx_reredirects",
     "sphinx.ext.mathjax",
     "myst_parser",
-    "autoapi.extension",
 ]
-
-autoapi_type = "python"
-autoapi_dirs = ["../diffulex"]
-
-autoapi_options = [
-    "members",
-    "undoc-members",
-    "show-inheritance",
-    "show-module-summary",
-    "special-members",
-]
-autoapi_keep_files = False  # Useful for debugging the generated rst files
-
-autoapi_generate_api_docs = True
 
 autodoc_typehints = "description"
-
-autoapi_ignore = ["*language/ast*", "*version*", "*libinfo*", "*parser*"]
 
 source_suffix = {
     ".rst": "restructuredtext",

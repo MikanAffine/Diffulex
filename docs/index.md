@@ -42,11 +42,6 @@ tutorials/index
 
 :::{toctree}
 :maxdepth: 1
-:caption: API Reference
-:::
-
-:::{toctree}
-:maxdepth: 1
 :caption: Privacy
 
 privacy
