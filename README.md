@@ -8,7 +8,15 @@
 
 </div>
 
-Diffulex is a Paged Attention-based dLLM accelerated decoding inference framework that is easy to develop and extensible. The design maximizes hiding the complexity of underlying KV Cache management, parallel strategy scheduling, and memory optimization. By providing a clean and unified API interface along with flexible inference strategy configurations (e.g., D2F, Block Diffusion, Fast-dLLM), Diffulex allows developers to focus on model inference logic and business requirements while maintaining production-level inference performance and resource utilization efficiency.
+Diffulex is a Paged Attention-based block-wise dLLM accelerated decoding inference framework that is easy to develop and extensible. The design maximizes hiding the complexity of underlying KV Cache management, parallel strategy scheduling, and memory optimization. By providing a clean and unified API interface along with flexible inference strategy configurations (e.g., D2F, Block Diffusion, Fast-dLLM), Diffulex allows developers to focus on model inference logic and business requirements while maintaining production-level inference performance and resource utilization efficiency.
+
+## Supported Models
+
+Currently supported models: D2F-LLaDA, D2F-Dream, Fast-dLLM-v2, SDAR, SDAR-MoE.
+
+Models in progress: D2F-DiffuCoder, LLaDA2, LLaDA2.1, LLaDA2-DMax, Stable-DiffCoder.
+
+Diffulex does not plan to support full-attention dLLM models, including the original LLaDA, Dream, LLaDA1.5, and DiffuCoder variants.
 
 ## Latest News
 - 12/22/2025 ✨: We are excited to announce that Diffulex, a Paged Attention-based dLLM accelerated decoding inference framework, is now open source and available to the public!
@@ -27,51 +35,7 @@ uv pip install -e .
 
 ## Quick Start
 
-Here's a simple example to get started with Diffulex:
-
-```python
-from diffulex import Diffulex, SamplingParams
-from transformers import AutoTokenizer
-
-# Initialize the Diffulex engine
-model_path = "/path/to/your/model"
-llm = Diffulex(
-    model_path,
-    model_name="fast_dllm_v2",  # or "dream", "llada", etc.
-    tensor_parallel_size=1,
-    data_parallel_size=1,
-    gpu_memory_utilization=0.25,
-    max_model_len=2048,
-    decoding_strategy="block_diffusion",  # or "d2f", "fast_dllm"
-    mask_token_id=151665,  # model-specific mask token ID
-)
-
-# Load tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
-# Set sampling parameters
-sampling_params = SamplingParams(
-    temperature=0.0,
-    max_tokens=256,
-)
-
-# Prepare prompts
-prompts = [
-    "Question: What is the capital of France? Answer:",
-    "Question: Explain quantum computing in simple terms. Answer:",
-]
-
-# Generate responses
-outputs = llm.generate(prompts, sampling_params)
-
-# Process results
-for output in outputs:
-    print(f"Generated text: {output['text']}")
-    print(f"Number of diffusion steps: {output['n_diff_steps']}")
-    print(f"Token IDs: {output['token_ids']}")
-```
-
-For more examples, check out the [examples](examples/) directory.
+For model-specific startup instructions and runnable configurations, see the [Cookbook](docs/cookbook.md).
 
 ## Upcoming Features
 

@@ -9,10 +9,10 @@ body:
       label: Required prerequisites
       description: Make sure you've completed the following steps before submitting your issue -- thank you!
       options:
-        - label: I have read the documentation <https://tilelang.com>.
+        - label: I have read the project documentation <https://github.com/SJTU-DENG-Lab/Diffulex#readme>.
           required: true
         - label: >-
-            I have searched the [Issue Tracker](https://github.com/tile-ai/tilelang/issues)
+            I have searched the [Issue Tracker](https://github.com/SJTU-DENG-Lab/Diffulex/issues)
             that this hasn't already been reported. (comment there if it has.)
           required: true
 
