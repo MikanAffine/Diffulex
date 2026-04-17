@@ -18,11 +18,11 @@ if [ -z "${CI}" ] && [ -z "${GITHUB_ACTIONS}" ]; then
     fi
     source .venv/bin/activate
     python -m pip install --upgrade pip
-    python -m pip install -r docs/requirements.txt
+    python -m pip install -r docs/requirements.txt --force-reinstall
 else
     # CI environment: just install dependencies (Python environment already set up)
     pip install --upgrade pip
-    pip install -r docs/requirements.txt
+    pip install -r docs/requirements.txt --force-reinstall
 fi
 
 # Build documentation

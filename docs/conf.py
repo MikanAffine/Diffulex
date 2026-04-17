@@ -68,8 +68,8 @@ html_theme_options = {
 }
 
 header_links = [
-    ("Home", "https://github.com/zhijie-group/Diffulex"),
-    ("Github", "https://github.com/zhijie-group/Diffulex"),
+    ("Home", "https://github.com/SJTU-DENG-Lab/Diffulex"),
+    ("Github", "https://github.com/SJTU-DENG-Lab/Diffulex"),
 ]
 
 html_context = {
@@ -77,7 +77,7 @@ html_context = {
     "footer_note": footer_note,
     "header_links": header_links,
     "display_github": True,
-    "github_user": "zhijie-group",
+    "github_user": "SJTU-DENG-Lab",
     "github_repo": "Diffulex",
     "github_version": "main/docs/",
     "theme_vcs_pageview_mode": "edit",

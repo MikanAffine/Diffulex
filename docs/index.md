@@ -1,6 +1,6 @@
 # 👋 Welcome to Diffulex
 
-[GitHub](https://github.com/zhijie-group/Diffulex)
+[GitHub](https://github.com/SJTU-DENG-Lab/Diffulex)
 
 Diffulex is a Paged Attention-based block-wise dLLM accelerated decoding inference framework that is easy to develop and extensible. The design maximizes hiding the complexity of underlying KV Cache management, parallel strategy scheduling, and memory optimization. By providing a clean and unified API interface along with flexible inference strategy configurations (e.g., D2F, Block Diffusion, Fast-dLLM), Diffulex allows developers to focus on model inference logic and business requirements while maintaining production-level inference performance and resource utilization efficiency.
 

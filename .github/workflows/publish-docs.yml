@@ -1,6 +1,9 @@
 name: Documentation
 
 on:
+  push:
+    branches:
+      - main
   pull_request_target:
     types:
       - closed
@@ -15,6 +18,10 @@ jobs:
     if: |
       github.repository_owner == 'SJTU-DENG-Lab' &&
       (
+        (
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main'
+        ) ||
         (
           github.event_name == 'pull_request_target' &&
           github.event.pull_request.merged == true &&
