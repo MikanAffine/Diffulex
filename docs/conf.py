@@ -17,7 +17,6 @@ release = version
 
 extensions = [
     "sphinx_tabs.tabs",
-    "sphinx_toolbox.collapse",
     "sphinxcontrib.httpdomain",
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",

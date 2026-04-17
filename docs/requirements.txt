@@ -1,9 +1,8 @@
 fastapi
 pydantic
-sphinx==7.4.7
+sphinx
 sphinx-reredirects
 sphinx-tabs
-sphinx-toolbox
 sphinxcontrib-napoleon
 sphinxcontrib_httpdomain
 furo
