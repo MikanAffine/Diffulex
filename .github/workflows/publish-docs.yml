@@ -46,34 +46,10 @@ jobs:
         run: |
           bash -ex script/build_docs.sh
 
-      - name: Push built docs to another repo
-        run: |
-          # Hide sensitive info in logs
-          echo "::add-mask::${{ secrets.TARGET_TOKEN }}"
-          echo "::add-mask::${{ secrets.TARGET_REPO }}"
-          if [[ -z "${{ secrets.TARGET_REPO }}" ]]; then
-            echo "TARGET_REPO secret is empty"
-            exit 1
-          fi
-          if [[ -z "${{ secrets.TARGET_TOKEN }}" ]]; then
-            echo "TARGET_TOKEN secret is empty"
-            exit 1
-          fi
-          TARGET_REPO_URL="https://github.com/${{ secrets.TARGET_REPO }}.git"
-          echo "Publishing docs to configured target repository"
-
-          git clone "${TARGET_REPO_URL}" -b main target_repo
-          cd target_repo
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          find . -mindepth 1 -maxdepth 1 ! -name ".github" ! -name "." ! -name ".git" -exec rm -rf {} +
-          shopt -s dotglob
-          cp -r ../docs/_build/html/* ./
-          git add .
-          if [[ -n "$(git status --porcelain)" ]]; then
-            # If there are changes, commit and push
-            git commit -m "Update docs"
-            git push "https://github-actions[bot]:${{ secrets.TARGET_TOKEN }}@${TARGET_REPO_URL##*://}" main
-          else
-            echo "No changes detected, skipping commit and push."
-          fi
+      - name: Publish docs to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/_build/html
+          publish_branch: gh-pages
+          force_orphan: true
