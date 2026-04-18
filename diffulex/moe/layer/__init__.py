@@ -1,4 +1,12 @@
 from diffulex.moe.layer.base import FusedMoE
+from diffulex.moe.layer.a2a import (
+    A2ABackend,
+    A2ATokenDispatchBackend,
+    DeepEPA2ABackend,
+    DispatchState,
+    NoneA2ABackend,
+    build_a2a_backend,
+)
 from diffulex.moe.layer.trivial_impl import TrivialFusedMoE
 from diffulex.moe.layer.tp_impl import TPFusedMoE
 from diffulex.moe.layer.ep_impl import EPFusedMoE
@@ -31,6 +39,12 @@ def build_moe_block(
 __all__ = [
     "build_moe_block",
     "FusedMoE",
+    "A2ABackend",
+    "A2ATokenDispatchBackend",
+    "DeepEPA2ABackend",
+    "DispatchState",
+    "NoneA2ABackend",
+    "build_a2a_backend",
 
     "TrivialFusedMoE",
     "TPFusedMoE",

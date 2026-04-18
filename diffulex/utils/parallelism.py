@@ -95,6 +95,14 @@ class ModelParallelismMetadata:
 _MODEL_PARALLELISM_METADATA: ModelParallelismMetadata | None = None
 
 
+def _divide(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        raise ValueError(f"denominator must be >= 1, got {denominator}.")
+    if numerator % denominator != 0:
+        raise ValueError(f"{numerator} is not divisible by {denominator}.")
+    return numerator // denominator
+
+
 def get_world_size(tp_size: int, ep_size: int) -> int:
     if tp_size < 1:
         raise ValueError(f"tp_size must be >= 1, got {tp_size}.")
@@ -168,6 +176,26 @@ def get_ep_world_size() -> int:
 
 def is_ep_enabled() -> bool:
     return get_model_parallelism_metadata().ep_size > 1
+
+
+def get_ep_local_expert_bounds(num_experts: int) -> tuple[int, int]:
+    metadata = get_model_parallelism_metadata()
+    num_local_experts = _divide(num_experts, metadata.ep_size)
+    local_expert_start = metadata.ep_rank * num_local_experts
+    local_expert_end = local_expert_start + num_local_experts
+    return local_expert_start, local_expert_end
+
+
+def owns_global_expert(num_experts: int, expert_idx: int) -> bool:
+    local_expert_start, local_expert_end = get_ep_local_expert_bounds(num_experts)
+    return local_expert_start <= expert_idx < local_expert_end
+
+
+def global_to_local_expert_id(num_experts: int, expert_idx: int) -> int:
+    local_expert_start, local_expert_end = get_ep_local_expert_bounds(num_experts)
+    if not (local_expert_start <= expert_idx < local_expert_end):
+        raise AssertionError(f"global_expert_idx {expert_idx} is not owned by this rank")
+    return expert_idx - local_expert_start
 
 
 def init_process_group(
