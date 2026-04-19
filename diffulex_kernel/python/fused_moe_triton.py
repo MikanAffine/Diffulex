@@ -17,11 +17,6 @@ import triton.language as tl
 
 from diffulex.moe.metadata import ExpertExecutionMetadata
 
-try:
-    from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
-except ImportError:
-    sgl_moe_align_block_size = None
-
 
 PACKED_BLOCK_M = 16
 WORKSPACE_CACHE: dict[tuple[str, int, torch.dtype], torch.Tensor] = {}
@@ -344,6 +339,83 @@ def _weighted_scatter_add(
     )
 
 
+@triton.jit
+def _count_slots_per_expert(
+    local_expert_ids_ptr,
+    counts_ptr,
+    num_slots,
+    num_local_experts: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    mask = offsets < num_slots
+    expert_ids = tl.load(local_expert_ids_ptr + offsets, mask=mask, other=-1).to(tl.int32)
+    valid = mask & (expert_ids >= 0) & (expert_ids < num_local_experts)
+    tl.atomic_add(counts_ptr + expert_ids, 1, sem="relaxed", mask=valid)
+
+
+@triton.jit
+def _scatter_slots_by_expert(
+    local_expert_ids_ptr,
+    offsets_ptr,
+    cursors_ptr,
+    sorted_slot_ids_ptr,
+    num_slots,
+    num_local_experts: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    slot_offsets = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    mask = slot_offsets < num_slots
+    expert_ids = tl.load(local_expert_ids_ptr + slot_offsets, mask=mask, other=-1).to(tl.int32)
+    valid = mask & (expert_ids >= 0) & (expert_ids < num_local_experts)
+    expert_offsets = tl.load(offsets_ptr + expert_ids, mask=valid, other=0).to(tl.int32)
+    local_offsets = tl.atomic_add(cursors_ptr + expert_ids, 1, sem="relaxed", mask=valid).to(tl.int32)
+    dst_offsets = expert_offsets + local_offsets
+    tl.store(sorted_slot_ids_ptr + dst_offsets, slot_offsets, mask=valid)
+
+
+@triton.jit
+def _build_expert_offsets(
+    counts_ptr,
+    offsets_ptr,
+    padded_counts_ptr,
+    num_local_experts: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    running_offset = tl.full((), 0, dtype=tl.int32)
+    for expert_id in range(0, num_local_experts):
+        count = tl.load(counts_ptr + expert_id).to(tl.int32)
+        padded_count = ((count + block_size - 1) // block_size) * block_size
+        tl.store(offsets_ptr + expert_id, running_offset)
+        tl.store(padded_counts_ptr + expert_id, padded_count)
+        running_offset += padded_count
+
+
+@triton.jit
+def _fill_expert_block_ids(
+    offsets_ptr,
+    padded_counts_ptr,
+    expert_block_ids_ptr,
+    num_local_experts: tl.constexpr,
+    block_size: tl.constexpr,
+    max_num_blocks: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    expert_offsets = pid * BLOCK_E + tl.arange(0, BLOCK_E)
+    expert_mask = expert_offsets < num_local_experts
+    start_offsets = tl.load(offsets_ptr + expert_offsets, mask=expert_mask, other=0).to(tl.int32)
+    padded_counts = tl.load(padded_counts_ptr + expert_offsets, mask=expert_mask, other=0).to(tl.int32)
+    start_blocks = start_offsets // block_size
+    num_blocks = padded_counts // block_size
+
+    for block_offset in range(0, max_num_blocks):
+        valid = expert_mask & (block_offset < num_blocks)
+        tl.store(expert_block_ids_ptr + start_blocks + block_offset, expert_offsets, mask=valid)
+
+
 def _pack_fused_moe_inputs(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -421,44 +493,110 @@ def _build_aligned_block_metadata(
     block_size: int,
     num_local_experts: int,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None, int | None]:
-    if packed_local_expert_ids.numel() == 0 or sgl_moe_align_block_size is None:
+    if packed_local_expert_ids.numel() == 0:
         return None, None, None
-    topk_ids = packed_local_expert_ids[:, None].contiguous()
-    num_slots = int(topk_ids.numel())
+    return _build_aligned_block_metadata_triton(
+        packed_local_expert_ids,
+        block_size=block_size,
+        num_local_experts=num_local_experts,
+    )
+
+
+def _build_aligned_block_metadata_triton(
+    packed_local_expert_ids: torch.Tensor,
+    *,
+    block_size: int,
+    num_local_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    num_slots = int(packed_local_expert_ids.numel())
     max_num_tokens_padded = num_slots + (num_local_experts + 1) * (block_size - 1)
-    sorted_slot_ids = torch.empty(
+    max_num_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    max_blocks_per_expert = triton.cdiv(num_slots, block_size)
+
+    counts = _get_workspace_tensor(
+        "aligned_counts",
+        (num_local_experts,),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+        zero=True,
+    )
+    _count_slots_per_expert[
+        (triton.cdiv(num_slots, 256),)
+    ](
+        packed_local_expert_ids,
+        counts,
+        num_slots,
+        num_local_experts,
+        BLOCK_M=256,
+        num_warps=8,
+    )
+
+    offsets = _get_workspace_tensor(
+        "aligned_offsets",
+        (num_local_experts,),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+    )
+    padded_counts = _get_workspace_tensor(
+        "aligned_padded_counts",
+        (num_local_experts,),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+    )
+    _build_expert_offsets[(1,)](
+        counts,
+        offsets,
+        padded_counts,
+        num_local_experts,
+        block_size,
+        num_warps=1,
+    )
+    cursors = _get_workspace_tensor(
+        "aligned_cursors",
+        (num_local_experts,),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+        zero=True,
+    )
+    sorted_slot_ids = _get_workspace_tensor(
+        "aligned_sorted_slot_ids",
         (max_num_tokens_padded,),
         dtype=torch.int32,
         device=packed_local_expert_ids.device,
+        fill_value=-1,
     )
-    expert_block_ids = torch.empty(
-        (triton.cdiv(max_num_tokens_padded, block_size),),
+    expert_block_ids = _get_workspace_tensor(
+        "aligned_expert_block_ids",
+        (max_num_blocks,),
         dtype=torch.int32,
         device=packed_local_expert_ids.device,
+        fill_value=-1,
     )
-    num_tokens_post_pad = torch.empty(
-        (1,),
-        dtype=torch.int32,
-        device=packed_local_expert_ids.device,
-    )
-    cumsum_buffer = torch.empty(
-        (num_local_experts + 2,),
-        dtype=torch.int32,
-        device=packed_local_expert_ids.device,
-    )
-    sgl_moe_align_block_size(
-        topk_ids,
-        num_local_experts + 1,
-        block_size,
+    _scatter_slots_by_expert[
+        (triton.cdiv(num_slots, 256),)
+    ](
+        packed_local_expert_ids,
+        offsets,
+        cursors,
         sorted_slot_ids,
-        expert_block_ids,
-        num_tokens_post_pad,
-        cumsum_buffer,
-        True,
+        num_slots,
+        num_local_experts,
+        BLOCK_M=256,
+        num_warps=8,
     )
-    total = int(num_tokens_post_pad.item())
-    num_blocks = triton.cdiv(total, block_size)
-    return sorted_slot_ids[:total].contiguous(), expert_block_ids[:num_blocks].contiguous(), total
+    _fill_expert_block_ids[
+        (triton.cdiv(num_local_experts, 16),)
+    ](
+        offsets,
+        padded_counts,
+        expert_block_ids,
+        num_local_experts,
+        block_size,
+        max_blocks_per_expert,
+        BLOCK_E=16,
+        num_warps=1,
+    )
+    return sorted_slot_ids, expert_block_ids, max_num_tokens_padded
 
 
 def _launch_grouped_expert_gemm_gathered(
