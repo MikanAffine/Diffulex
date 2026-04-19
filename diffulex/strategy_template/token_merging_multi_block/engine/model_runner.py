@@ -94,9 +94,13 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
         self: TokenMergingMultiBlockModelRunnerTemplate,
         reqs: list[TokenMergingMultiBlockReqTemplate],
     ):
-        input_ids, positions = self.prepare_chunked_prefill_token_merging_multi_block(reqs)
-        temperatures = self.prepare_sample(reqs) if self.rank == 0 else None
+        local_reqs = self.filter_local_reqs(reqs)
+        if not local_reqs:
+            return self.gather_dp_sample_output(None)
+
+        input_ids, positions = self.prepare_chunked_prefill_token_merging_multi_block(local_reqs)
+        temperatures = self.prepare_sample(local_reqs) if self.is_model_parallel_root else None
         logits = self.run_model_multi_block(input_ids, positions)
-        sample_output = self.sampler(reqs, logits, temperatures) if self.rank == 0 else None
+        sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
         self.reset_attn_metadata()
-        return sample_output
+        return self.gather_dp_sample_output(sample_output)

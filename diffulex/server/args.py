@@ -27,6 +27,7 @@ class ServerArgs:
     data_parallel_size: int = 1
     master_addr: str = "localhost"
     master_port: int = 2333
+    distributed_timeout_seconds: int = 600
     device_ids: list[int] | None = None
 
     block_size: int = 32
@@ -39,6 +40,9 @@ class ServerArgs:
     enforce_eager: bool = False
     enable_prefix_caching: bool = True
     kv_cache_layout: str = "unified"
+    moe_dispatcher_backend: str = "standard"
+    deepep_mode: str = "auto"
+    deepep_num_max_dispatch_tokens_per_rank: int = 256
     add_block_threshold: float | None = None
     semi_complete_threshold: float | None = None
     accept_threshold: float | None = None
@@ -49,8 +53,6 @@ class ServerArgs:
     pre_merge_lora: bool = False
 
     def engine_kwargs(self) -> dict:
-        if self.data_parallel_size != 1:
-            raise ValueError("Phase 1 HTTP serving supports data_parallel_size=1 only")
         return {
             "model_name": self.model_name,
             "decoding_strategy": self.decoding_strategy,
@@ -59,6 +61,7 @@ class ServerArgs:
             "data_parallel_size": self.data_parallel_size,
             "master_addr": self.master_addr,
             "master_port": self.master_port,
+            "distributed_timeout_seconds": self.distributed_timeout_seconds,
             "device_ids": self.device_ids or [],
             "block_size": self.block_size,
             "buffer_size": self.buffer_size,
@@ -70,6 +73,9 @@ class ServerArgs:
             "enforce_eager": self.enforce_eager,
             "enable_prefix_caching": self.enable_prefix_caching,
             "kv_cache_layout": self.kv_cache_layout,
+            "moe_dispatcher_backend": self.moe_dispatcher_backend,
+            "deepep_mode": self.deepep_mode,
+            "deepep_num_max_dispatch_tokens_per_rank": self.deepep_num_max_dispatch_tokens_per_rank,
             "decoding_thresholds": {
                 "add_block_threshold": 0.1 if self.add_block_threshold is None else self.add_block_threshold,
                 "semi_complete_threshold": 0.9
@@ -100,6 +106,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-parallel-size", type=int, default=1)
     parser.add_argument("--master-addr", default="localhost")
     parser.add_argument("--master-port", type=int, default=2333)
+    parser.add_argument("--distributed-timeout-seconds", type=int, default=600)
     parser.add_argument("--device-ids", default="", help="Comma-separated logical CUDA device ids")
 
     parser.add_argument("--block-size", type=int, default=32)
@@ -112,6 +119,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--disable-prefix-caching", action="store_true")
     parser.add_argument("--kv-cache-layout", default="unified", choices=["unified", "distinct"])
+    parser.add_argument("--moe-dispatcher-backend", default="standard", choices=["standard", "naive", "deepep"])
+    parser.add_argument("--deepep-mode", default="auto", choices=["normal", "low_latency", "auto"])
+    parser.add_argument("--deepep-num-max-dispatch-tokens-per-rank", type=int, default=256)
     parser.add_argument("--add-block-threshold", type=float, default=None)
     parser.add_argument("--semi-complete-threshold", type=float, default=None)
     parser.add_argument("--accept-threshold", type=float, default=None)
@@ -139,6 +149,7 @@ def parse_args(argv: Sequence[str] | None = None) -> ServerArgs:
         data_parallel_size=ns.data_parallel_size,
         master_addr=ns.master_addr,
         master_port=ns.master_port,
+        distributed_timeout_seconds=ns.distributed_timeout_seconds,
         device_ids=parse_device_ids(ns.device_ids),
         block_size=ns.block_size,
         buffer_size=ns.buffer_size,
@@ -150,6 +161,9 @@ def parse_args(argv: Sequence[str] | None = None) -> ServerArgs:
         enforce_eager=ns.enforce_eager,
         enable_prefix_caching=not ns.disable_prefix_caching,
         kv_cache_layout=ns.kv_cache_layout,
+        moe_dispatcher_backend=ns.moe_dispatcher_backend,
+        deepep_mode=ns.deepep_mode,
+        deepep_num_max_dispatch_tokens_per_rank=ns.deepep_num_max_dispatch_tokens_per_rank,
         add_block_threshold=ns.add_block_threshold,
         semi_complete_threshold=ns.semi_complete_threshold,
         accept_threshold=ns.accept_threshold,

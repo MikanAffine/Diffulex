@@ -2,24 +2,47 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+import diffulex.distributed.parallel_state as parallel_state
 from diffulex.model.auto_model import AutoModelForDiffusionLM
-from diffulex.model.llada2 import LLaDA2DecoderLayer, LLaDA2ForDiffusionLM, LLaDA2Model, LLaDA2TrivialMoE
+from diffulex.model.llada2 import (
+    LLaDA2DecoderLayer,
+    LLaDA2ForDiffusionLM,
+    LLaDA2GroupLimitedRouter,
+    LLaDA2Model,
+    LLaDA2TPMoE,
+    LLaDA2TrivialMoE,
+)
 from diffulex.moe import is_moe_layer
-from diffulex.utils import parallelism
 
 
 def _mock_single_rank(monkeypatch):
-    parallelism.reset_model_parallelism_metadata()
+    parallel_state.reset_parallel_state()
     monkeypatch.setattr(
-        parallelism,
-        "_MODEL_PARALLELISM_METADATA",
-        parallelism.ModelParallelismMetadata.from_world(
+        parallel_state,
+        "PARALLEL_STATE",
+        parallel_state.build_parallel_state_for_test(
             tp_size=1,
             ep_size=1,
+            dp_size=1,
             world_size=1,
             global_rank=0,
+        ),
+    )
+
+
+def _mock_tp_rank(monkeypatch, *, tp_size: int, global_rank: int):
+    parallel_state.reset_parallel_state()
+    monkeypatch.setattr(
+        parallel_state,
+        "PARALLEL_STATE",
+        parallel_state.build_parallel_state_for_test(
+            tp_size=tp_size,
+            ep_size=1,
+            dp_size=1,
+            global_rank=global_rank,
         ),
     )
 
@@ -79,6 +102,17 @@ def test_llada2_decoder_layer_uses_moe_after_dense_prefix(monkeypatch):
     assert isinstance(moe_layer.mlp, LLaDA2TrivialMoE)
     assert moe_layer.mlp.shared_experts is not None
     assert tuple(moe_layer.mlp.gate.expert_bias.shape) == (4,)
+
+
+def test_llada2_tp_moe_shards_experts_not_intermediate(monkeypatch):
+    _mock_tp_rank(monkeypatch, tp_size=2, global_rank=1)
+    moe = LLaDA2TPMoE.from_config(_make_config(num_experts=4, moe_intermediate_size=6))
+
+    assert moe.num_local_experts == 2
+    assert moe.local_expert_start == 2
+    assert moe.local_expert_end == 4
+    assert tuple(moe.w13.shape) == (2, 12, 8)
+    assert tuple(moe.w2.shape) == (2, 8, 6)
 
 
 def test_llada2_parameter_names_match_dmax_layout(monkeypatch):
@@ -176,3 +210,45 @@ def test_llada2_token_merge_hook_supports_iter_smooth_mode(monkeypatch):
 
     assert torch.allclose(merged[0], hidden[0] + 0.25 * 0.5 * model.word_embeddings.weight[2])
     assert torch.allclose(merged[1], hidden[1])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    ("num_experts", "top_k", "n_group", "topk_group"),
+    [
+        (4, 2, 2, 1),
+        (16, 4, 4, 2),
+        (16, 4, 0, 0),
+    ],
+)
+def test_llada2_group_limited_router_triton_matches_torch(
+    num_experts: int,
+    top_k: int,
+    n_group: int,
+    topk_group: int,
+):
+    torch.manual_seed(0)
+    expert_bias = torch.randn(num_experts, device="cuda", dtype=torch.float32) * 0.1
+    router = LLaDA2GroupLimitedRouter(
+        top_k=top_k,
+        num_experts=num_experts,
+        n_group=n_group,
+        topk_group=topk_group,
+        routed_scaling_factor=2.5,
+        renormalize=True,
+        expert_bias_getter=lambda: expert_bias,
+    )
+    router_logits = torch.randn(11, num_experts, device="cuda", dtype=torch.float32)
+
+    actual = router(router_logits)
+    expected = router._forward_torch(router_logits)
+
+    actual_order = actual.ids.argsort(dim=-1)
+    expected_order = expected.ids.argsort(dim=-1)
+    actual_ids = actual.ids.gather(1, actual_order).to(torch.long)
+    expected_ids = expected.ids.gather(1, expected_order).to(torch.long)
+    actual_weights = actual.weights.gather(1, actual_order)
+    expected_weights = expected.weights.gather(1, expected_order)
+
+    assert torch.equal(actual_ids, expected_ids.to(actual_ids.dtype))
+    assert torch.allclose(actual_weights.float(), expected_weights.float(), rtol=1e-3, atol=1e-3)

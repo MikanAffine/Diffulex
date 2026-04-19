@@ -5,23 +5,24 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
+import diffulex.distributed.parallel_state as parallel_state
 from diffulex.model.sdar import SDARAttention
 from diffulex.model.sdar_moe import SDARMoEDecoderLayer, SDARMoEForDiffusionLM
 from diffulex.moe import SparseMoEBlock, build_mlp_or_moe, is_moe_layer
 from diffulex.moe.layer.trivial_impl import TrivialFusedMoE
-from diffulex.utils import parallelism
 
 
 def _mock_tp(monkeypatch):
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
-    parallelism.reset_model_parallelism_metadata()
+    parallel_state.reset_parallel_state()
     monkeypatch.setattr(
-        parallelism,
-        "_MODEL_PARALLELISM_METADATA",
-        parallelism.ModelParallelismMetadata.from_world(
+        parallel_state,
+        "PARALLEL_STATE",
+        parallel_state.build_parallel_state_for_test(
             tp_size=1,
             ep_size=1,
+            dp_size=1,
             world_size=1,
             global_rank=0,
         ),

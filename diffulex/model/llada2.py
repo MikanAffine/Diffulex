@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import einsum, rearrange, reduce, repeat
 
 from diffulex.attention import Attention
 from diffulex.layer.activation import SiluAndMul
@@ -16,7 +17,7 @@ from diffulex.moe.layer.ep_impl import EPFusedMoE
 from diffulex.moe.layer.tp_impl import TPFusedMoE
 from diffulex.moe.layer.trivial_impl import TrivialFusedMoE
 from diffulex.moe.topk.datatype import TopKOutput
-from diffulex.utils.parallelism import get_tp_rank, get_tp_world_size, is_ep_enabled, is_tp_enabled
+from diffulex.distributed.parallel_state import fetch_parallel_state
 
 
 class LLaDA2PartialRotaryEmbedding(nn.Module):
@@ -34,7 +35,7 @@ class LLaDA2PartialRotaryEmbedding(nn.Module):
         self.rotary_dim = rotary_dim
         inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         positions = torch.arange(max_position_embeddings, dtype=torch.float)
-        freqs = torch.einsum("i,j->ij", positions, inv_freq)
+        freqs = einsum(positions, inv_freq, "position, rotary -> position rotary")
         self.register_buffer("cos_cache", torch.cat((freqs.cos(), freqs.cos()), dim=-1), persistent=False)
         self.register_buffer("sin_cache", torch.cat((freqs.sin(), freqs.sin()), dim=-1), persistent=False)
 
@@ -44,13 +45,14 @@ class LLaDA2PartialRotaryEmbedding(nn.Module):
         return torch.cat((-x2, x1), dim=-1)
 
     def _apply(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        original_shape = x.shape
-        x = x.view(positions.shape[0], -1, self.head_size)
+        if positions.numel() == 0:
+            return x
+        x = rearrange(x, "token (head head_dim) -> token head head_dim", head_dim=self.head_size)
         x_rot, x_pass = x[..., : self.rotary_dim], x[..., self.rotary_dim :]
-        cos = self.cos_cache[positions].unsqueeze(1).to(dtype=x.dtype)
-        sin = self.sin_cache[positions].unsqueeze(1).to(dtype=x.dtype)
+        cos = rearrange(self.cos_cache[positions], "token rotary -> token 1 rotary").to(dtype=x.dtype)
+        sin = rearrange(self.sin_cache[positions], "token rotary -> token 1 rotary").to(dtype=x.dtype)
         x_rot = (x_rot * cos) + (self._rotate_half(x_rot) * sin)
-        return torch.cat((x_rot, x_pass), dim=-1).view(original_shape)
+        return rearrange(torch.cat((x_rot, x_pass), dim=-1), "token head head_dim -> token (head head_dim)")
 
     def forward(
         self,
@@ -76,8 +78,9 @@ class LLaDA2QKVParallelLinear(nn.Module):
         self.head_size = head_size
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
-        self.tp_size = get_tp_world_size()
-        self.tp_rank = get_tp_rank()
+        parallel_state = fetch_parallel_state()
+        self.tp_size = parallel_state.get_tp_world_size()
+        self.tp_rank = parallel_state.get_tp_rank()
         self.num_heads = divide(total_num_heads, self.tp_size)
         self.num_kv_heads = divide(total_num_kv_heads, self.tp_size)
         self.q_size = self.num_heads * head_size
@@ -110,7 +113,8 @@ class LLaDA2Attention(nn.Module):
     def __init__(self, config, layer_idx: int) -> None:
         super().__init__()
         del layer_idx
-        tp_size = get_tp_world_size()
+        parallel_state = fetch_parallel_state()
+        tp_size = parallel_state.get_tp_world_size()
         self.total_num_heads = config.num_attention_heads
         self.total_num_kv_heads = config.num_key_value_heads or config.num_attention_heads
         self.num_heads = divide(self.total_num_heads, tp_size)
@@ -153,8 +157,18 @@ class LLaDA2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv = self.query_key_value(hidden_states)
         q, k, v = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
-        q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim)).view(q.shape)
-        k = self.key_layernorm(k.view(-1, self.num_kv_heads, self.head_dim)).view(k.shape)
+        q = rearrange(
+            self.query_layernorm(
+                rearrange(q, "token (head head_dim) -> token head head_dim", head=self.num_heads)
+            ),
+            "token head head_dim -> token (head head_dim)",
+        )
+        k = rearrange(
+            self.key_layernorm(
+                rearrange(k, "token (head head_dim) -> token head head_dim", head=self.num_kv_heads)
+            ),
+            "token head head_dim -> token (head head_dim)",
+        )
         q, k = self.rotary_emb(positions, q, k)
         return self.dense(self.attn(q, k, v, mask))
 
@@ -204,18 +218,27 @@ class LLaDA2GroupLimitedRouter(nn.Module):
         ):
             return torch.topk(scores, k=self.top_k, dim=-1, sorted=False).indices
         experts_per_group = self.num_experts // self.n_group
-        group_scores = scores.view(scores.shape[0], self.n_group, experts_per_group).topk(
+        scores_by_group = rearrange(
+            scores,
+            "token (group expert) -> token group expert",
+            group=self.n_group,
+        )
+        group_scores = scores_by_group.topk(
             min(2, experts_per_group),
             dim=-1,
         ).values.sum(dim=-1)
         group_idx = torch.topk(group_scores, k=min(self.topk_group, self.n_group), dim=-1, sorted=False).indices
         group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
         group_mask.scatter_(1, group_idx, True)
-        score_mask = group_mask.unsqueeze(-1).expand(-1, -1, experts_per_group).reshape(scores.shape)
+        score_mask = repeat(
+            group_mask,
+            "token group -> token (group expert)",
+            expert=experts_per_group,
+        )
         masked_scores = scores.masked_fill(~score_mask, float("-inf"))
         return torch.topk(masked_scores, k=self.top_k, dim=-1, sorted=False).indices
 
-    def forward(self, router_logits: torch.Tensor) -> TopKOutput:
+    def _forward_torch(self, router_logits: torch.Tensor) -> TopKOutput:
         scores = torch.sigmoid(router_logits.float()).to(router_logits.dtype)
         expert_bias = self._expert_bias_getter().to(scores.device, dtype=scores.dtype)
         topk_ids = self._group_limited_topk(scores + expert_bias)
@@ -223,6 +246,24 @@ class LLaDA2GroupLimitedRouter(nn.Module):
         if self.renormalize and self.top_k > 1:
             topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
         topk_weights = topk_weights * self.routed_scaling_factor
+        return TopKOutput(weights=topk_weights, ids=topk_ids, router_logits=router_logits)
+
+    def forward(self, router_logits: torch.Tensor) -> TopKOutput:
+        if not router_logits.is_cuda:
+            return self._forward_torch(router_logits)
+
+        from diffulex_kernel import llada2_group_limited_topk
+
+        expert_bias = self._expert_bias_getter().to(router_logits.device, dtype=router_logits.dtype)
+        topk_weights, topk_ids = llada2_group_limited_topk(
+            router_logits=router_logits,
+            expert_bias=expert_bias,
+            top_k=self.top_k,
+            n_group=self.n_group,
+            topk_group=self.topk_group,
+            routed_scaling_factor=self.routed_scaling_factor,
+            renormalize=self.renormalize,
+        )
         return TopKOutput(weights=topk_weights, ids=topk_ids, router_logits=router_logits)
 
 
@@ -292,6 +333,13 @@ class LLaDA2EPMoE(LLaDA2MoEMixin, EPFusedMoE):
             top_k=int(config.num_experts_per_tok),
             hidden_act=getattr(config, "hidden_act", "silu"),
             norm_topk_prob=get_norm_topk_prob(config),
+            dispatcher_backend=getattr(config, "moe_dispatcher_backend", "naive"),
+            deepep_mode=getattr(config, "deepep_mode", "auto"),
+            deepep_num_max_dispatch_tokens_per_rank=getattr(
+                config,
+                "deepep_num_max_dispatch_tokens_per_rank",
+                256,
+            ),
         )
         module._init_llada2_moe(config)
         return module
@@ -300,9 +348,10 @@ class LLaDA2EPMoE(LLaDA2MoEMixin, EPFusedMoE):
 def build_llada2_mlp(config, layer_idx: int) -> nn.Module:
     if not is_moe_layer(config, layer_idx):
         return LLaDA2DenseMLP(config)
-    if is_ep_enabled():
+    parallel_state = fetch_parallel_state()
+    if parallel_state.is_ep_enabled():
         return LLaDA2EPMoE.from_config(config)
-    if is_tp_enabled():
+    if parallel_state.is_tp_enabled():
         return LLaDA2TPMoE.from_config(config)
     return LLaDA2TrivialMoE.from_config(config)
 
@@ -384,9 +433,18 @@ class LLaDA2Model(nn.Module):
         topk_probs = topk_probs.to(device=device, dtype=torch.float32)
         residual_probs = residual_probs.to(device=device, dtype=torch.float32)
 
-        flat_topk_ids = topk_ids.reshape(-1)
-        topk_embeds = self.word_embeddings(flat_topk_ids).view(*topk_ids.shape, hidden_states.shape[-1])
-        topk_weighted = (topk_embeds.to(torch.float32) * topk_probs.unsqueeze(-1)).sum(dim=1)
+        flat_topk_ids = rearrange(topk_ids, "token topk -> (token topk)")
+        topk_embeds = rearrange(
+            self.word_embeddings(flat_topk_ids),
+            "(token topk) hidden -> token topk hidden",
+            token=topk_ids.shape[0],
+            topk=topk_ids.shape[1],
+        )
+        topk_weighted = reduce(
+            topk_embeds.to(torch.float32) * rearrange(topk_probs, "token topk -> token topk 1"),
+            "token topk hidden -> token hidden",
+            "sum",
+        )
 
         if merge_mode == "dmax_topk":
             mask_id = torch.tensor([int(mask_token_id)], dtype=torch.int64, device=device)

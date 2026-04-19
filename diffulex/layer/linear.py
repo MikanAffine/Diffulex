@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from diffulex.utils.parallelism import get_tp_rank, get_tp_world_size
+from diffulex.distributed.parallel_state import fetch_parallel_state
 
 
 def divide(numerator, denominator):
@@ -78,8 +78,10 @@ class LinearBase(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.tp_dim = tp_dim
-        self.tp_rank = get_tp_rank()
-        self.tp_size = get_tp_world_size()
+        parallel_state = fetch_parallel_state()
+        self.tp_rank = parallel_state.get_tp_rank()
+        self.tp_size = parallel_state.get_tp_world_size()
+        self.tp_group = parallel_state.get_tp_group()
 
     def _forward_base(self, x: torch.Tensor, bias: nn.Parameter | None) -> torch.Tensor:
         return F.linear(x, self.weight, bias)
@@ -198,7 +200,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.head_size = head_size
         self.total_num_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads or total_num_heads
-        tp_size = get_tp_world_size()
+        parallel_state = fetch_parallel_state()
+        tp_size = parallel_state.get_tp_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
         self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
         input_size = hidden_size
@@ -262,14 +265,15 @@ class RowParallelLinear(LinearBase, LoRAMixin):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if self.tp_rank == 0 else None
+        tp_group = self.tp_group
         y = self._forward_base(x, bias)
         if hasattr(self, "r") and self.r > 0 and not self.merged:
             lora_out = F.linear(self.lora_dropout(x), self.lora_A)
             lora_out = F.linear(lora_out, self.lora_B)
             if self.tp_size > 1:
-                dist.all_reduce(y)
-                dist.all_reduce(lora_out)
+                dist.all_reduce(y, group=tp_group)
+                dist.all_reduce(lora_out, group=tp_group)
             return y + lora_out * self.scaling
         if self.tp_size > 1:
-            dist.all_reduce(y)
+            dist.all_reduce(y, group=tp_group)
         return y

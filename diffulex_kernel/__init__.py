@@ -41,10 +41,18 @@ def __getattr__(name: str):
     if name == "fused_moe":
         from diffulex_kernel.python.fused_moe_triton import fused_moe
         return fused_moe
+
+    if name == "fused_expert_packed":
+        from diffulex_kernel.python.fused_moe_triton import fused_expert_packed
+        return fused_expert_packed
     
     if name == "fused_topk":
         from diffulex_kernel.python.fused_topk_triton import fused_topk
         return fused_topk
+
+    if name == "llada2_group_limited_topk":
+        from diffulex_kernel.python.fused_topk_triton import llada2_group_limited_topk
+        return llada2_group_limited_topk
 
     raise AttributeError(name)
 
@@ -55,4 +63,8 @@ __all__ = [
     "store_kv_cache_unified_layout",
     "store_kv_cache_distinct_layout",
     "load_kv_cache",
+    "fused_moe",
+    "fused_expert_packed",
+    "fused_topk",
+    "llada2_group_limited_topk",
 ]

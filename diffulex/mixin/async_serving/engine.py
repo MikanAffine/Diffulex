@@ -37,8 +37,8 @@ class ServingState:
     requests: dict[int, ServingRequestState] = field(default_factory=dict)
 
 
-class DiffulexServingWorkerMixin:
-    """Serving-only owner-loop helpers for DiffulexTPWorker.
+class DiffulexAsyncEngineMixin:
+    """Serving-only owner-loop helpers for DiffulexEngine.
 
     The async HTTP frontend should enqueue ServingCommand objects and call
     run_serving_tick() from exactly one engine owner thread. The mixin keeps

@@ -22,6 +22,8 @@ class DllmReq(ReqStateMixin):
     def __init__(self, token_ids: list[int], sampling_params: SamplingParams = SamplingParams()):
         self.req_id = next(DllmReq.counter)
         self.status = DllmReqStatus.WAITING
+        self.dp_rank = 0
+        self._dp_owner_assigned = False
         self.token_ids = copy(token_ids)
         self.last_token = token_ids[-1]
         self.num_prompt_tokens = len(token_ids)
@@ -37,6 +39,7 @@ class DllmReq(ReqStateMixin):
         self.nfe = 0
         self.meet_eos = False
         self.is_multi_block = False
+        self._execution_prepared = False
 
     def __len__(self) -> int:
         return self.num_tokens
@@ -70,6 +73,20 @@ class DllmReq(ReqStateMixin):
 
     def reset_new_tokens(self):
         self.new_tokens = 0
+
+    @property
+    def is_execution_prepared(self) -> bool:
+        return bool(self._execution_prepared)
+
+    def mark_execution_prepared(self) -> None:
+        self._execution_prepared = True
+
+    def clear_execution_prepared(self) -> None:
+        self._execution_prepared = False
+
+    def assign_dp_rank(self, dp_rank: int) -> None:
+        self.dp_rank = dp_rank
+        self._dp_owner_assigned = True
 
     def page(self, index: int) -> list[int]:
         assert 0 <= index < self.num_pages

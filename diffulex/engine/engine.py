@@ -2,25 +2,26 @@ import atexit
 
 import torch.multiprocessing as mp
 
-from tqdm.auto import tqdm
-from time import perf_counter
 from dataclasses import fields
+from time import perf_counter
+
+from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from diffulex.config import Config
-from diffulex.sampling_params import SamplingParams
-from diffulex.engine.request import AutoReq
-from diffulex.engine.scheduler import AutoScheduler, SchedulerBase
+from diffulex.distributed.parallel_state import get_world_size
 from diffulex.engine.model_runner import AutoModelRunner
-from diffulex.mixin.async_engine.engine.serving_worker import DiffulexServingWorkerMixin
-from diffulex.utils.output import GenerationOutputs
-from diffulex.utils.parallelism import get_world_size
+from diffulex.engine.request import AutoReq
+from diffulex.engine.scheduler import AutoScheduler, DataParallelScheduler, SchedulerBase
 from diffulex.logger import get_logger
+from diffulex.mixin.async_serving.engine import DiffulexAsyncEngineMixin
+from diffulex.sampling_params import SamplingParams
+from diffulex.utils.output import GenerationOutputs
 
 logger = get_logger(__name__)
 
 
-class DiffulexTPWorker(DiffulexServingWorkerMixin):
+class DiffulexEngine(DiffulexAsyncEngineMixin):
     def __init__(self, model, **kwargs):
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
@@ -28,7 +29,13 @@ class DiffulexTPWorker(DiffulexServingWorkerMixin):
         self.model_parallel_world_size = get_world_size(
             config.tensor_parallel_size,
             config.expert_parallel_size,
+            dp_size=config.data_parallel_size,
         )
+        if len(config.device_ids) < self.model_parallel_world_size:
+            raise ValueError(
+                "Not enough CUDA devices for the requested topology, "
+                f"need {self.model_parallel_world_size}, got device_ids={config.device_ids}."
+            )
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
@@ -41,7 +48,7 @@ class DiffulexTPWorker(DiffulexServingWorkerMixin):
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True, trust_remote_code=True)
         config.tokenizer_vocab_size = len(self.tokenizer)
         config.eos = self.tokenizer.eos_token_id
-        
+
         if getattr(self.tokenizer, "mask_token_id", None) is not None and config.mask_token_id != self.tokenizer.mask_token_id:
             logger.warning(
                 "Overriding mask_token_id from %s to tokenizer mask_token_id %s.",
@@ -49,9 +56,9 @@ class DiffulexTPWorker(DiffulexServingWorkerMixin):
                 self.tokenizer.mask_token_id,
             )
             config.mask_token_id = self.tokenizer.mask_token_id
-            
+
         self.model_runner = AutoModelRunner.from_config(config, 0, self.events)
-        self.scheduler: SchedulerBase = AutoScheduler.from_config(config)
+        self.scheduler: SchedulerBase | DataParallelScheduler = AutoScheduler.from_config(config)
         self._exited = False
         atexit.register(self.exit)
 
@@ -85,12 +92,33 @@ class DiffulexTPWorker(DiffulexServingWorkerMixin):
 
     def step(self):
         reqs, is_prefill = self.scheduler.schedule()
-        sample_output = self.model_runner.call("run", reqs)
+        self._prepare_reqs_for_execution(reqs)
+        try:
+            sample_output = self.model_runner.call("run", reqs)
+        finally:
+            self._clear_execution_prepared(reqs)
         self.scheduler.postprocess(reqs, sample_output)
         finished_req_ids = [req.req_id for req in reqs if (req.is_completed or req.is_finished)]
         if finished_req_ids:
             self.model_runner.call("evict_sampler_state", finished_req_ids)
         return reqs, is_prefill
+
+    @staticmethod
+    def _prepare_reqs_for_execution(reqs):
+        for req in reqs:
+            step_fn = getattr(req, "step", None)
+            if callable(step_fn):
+                step_fn()
+            mark_fn = getattr(req, "mark_execution_prepared", None)
+            if callable(mark_fn):
+                mark_fn()
+
+    @staticmethod
+    def _clear_execution_prepared(reqs):
+        for req in reqs:
+            clear_fn = getattr(req, "clear_execution_prepared", None)
+            if callable(clear_fn):
+                clear_fn()
 
     def is_finished(self):
         return self.scheduler.is_finished()
@@ -145,3 +173,6 @@ class DiffulexTPWorker(DiffulexServingWorkerMixin):
         outputs.convert_to_text(self.tokenizer)
 
         return outputs
+
+
+__all__ = ["DiffulexEngine"]

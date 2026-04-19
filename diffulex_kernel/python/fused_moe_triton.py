@@ -7,7 +7,6 @@ This version keeps Diffulex's current high-level dispatcher contract
 expert-major pack/sort step before launching Triton kernels.
 """
 
-from dataclasses import dataclass
 from math import prod
 
 import torch
@@ -16,9 +15,16 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from diffulex.moe.metadata import ExpertExecutionMetadata
+
+try:
+    from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
+except ImportError:
+    sgl_moe_align_block_size = None
+
 
 PACKED_BLOCK_M = 16
-_WORKSPACE_CACHE: dict[tuple[str, int, torch.dtype], torch.Tensor] = {}
+WORKSPACE_CACHE: dict[tuple[str, int, torch.dtype], torch.Tensor] = {}
 
 
 def _workspace_device_index(device: torch.device) -> int:
@@ -36,25 +42,16 @@ def _get_workspace_tensor(
 ) -> torch.Tensor:
     numel = prod(shape)
     key = (name, _workspace_device_index(device), dtype)
-    buffer = _WORKSPACE_CACHE.get(key)
+    buffer = WORKSPACE_CACHE.get(key)
     if buffer is None or buffer.numel() < numel:
         buffer = torch.empty(numel, device=device, dtype=dtype)
-        _WORKSPACE_CACHE[key] = buffer
+        WORKSPACE_CACHE[key] = buffer
     out = buffer[:numel].view(*shape)
     if zero:
         out.zero_()
     elif fill_value is not None:
         out.fill_(fill_value)
     return out
-
-
-@dataclass
-class PackedMoEInputs:
-    packed_token_ids: torch.Tensor
-    packed_weights: torch.Tensor
-    expert_block_ids: torch.Tensor
-    num_valid_slots: int
-    num_padded_slots: int
 
 
 def _validate_fused_moe_inputs(
@@ -97,7 +94,7 @@ def _validate_fused_moe_inputs(
 def _grouped_expert_gemm_gathered(
     a_ptr,
     token_ids_ptr,
-    expert_block_ids_ptr,
+    expert_ids_ptr,
     w_ptr,
     out_ptr,
     num_rows,
@@ -106,7 +103,7 @@ def _grouped_expert_gemm_gathered(
     stride_am,
     stride_ak,
     stride_t,
-    stride_be,
+    stride_e,
     stride_we,
     stride_wn,
     stride_wk,
@@ -128,10 +125,12 @@ def _grouped_expert_gemm_gathered(
         mask=row_mask,
         other=-1,
     ).to(tl.int32)
-    valid_rows = row_mask & (token_ids >= 0)
-    expert_id = tl.load(
-        expert_block_ids_ptr + pid_m * stride_be,
+    expert_ids = tl.load(
+        expert_ids_ptr + offs_m * stride_e,
+        mask=row_mask,
+        other=0,
     ).to(tl.int32)
+    valid_rows = row_mask & (token_ids >= 0)
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     k_offsets = tl.arange(0, BLOCK_K)
@@ -146,10 +145,10 @@ def _grouped_expert_gemm_gathered(
         ).to(tl.float32)
         b = tl.load(
             w_ptr
-            + expert_id * stride_we
+            + expert_ids[:, None, None] * stride_we
             + offs_n[None, :, None] * stride_wn
             + current_k[None, None, :] * stride_wk,
-            mask=(offs_n[None, :, None] < num_cols) & k_mask[None, None, :],
+            mask=valid_rows[:, None, None] & (offs_n[None, :, None] < num_cols) & k_mask[None, None, :],
             other=0.0,
         ).to(tl.float32)
         acc += tl.sum(a[:, None, :] * b, axis=2)
@@ -164,7 +163,7 @@ def _grouped_expert_gemm_gathered(
 @triton.jit
 def _grouped_expert_gemm_packed(
     a_ptr,
-    expert_block_ids_ptr,
+    expert_ids_ptr,
     w_ptr,
     out_ptr,
     num_rows,
@@ -172,7 +171,7 @@ def _grouped_expert_gemm_packed(
     k_dim,
     stride_am,
     stride_ak,
-    stride_be,
+    stride_e,
     stride_we,
     stride_wn,
     stride_wk,
@@ -188,8 +187,10 @@ def _grouped_expert_gemm_packed(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = offs_m < num_rows
-    expert_id = tl.load(
-        expert_block_ids_ptr + pid_m * stride_be,
+    expert_ids = tl.load(
+        expert_ids_ptr + offs_m * stride_e,
+        mask=row_mask,
+        other=0,
     ).to(tl.int32)
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -205,10 +206,10 @@ def _grouped_expert_gemm_packed(
         ).to(tl.float32)
         b = tl.load(
             w_ptr
-            + expert_id * stride_we
+            + expert_ids[:, None, None] * stride_we
             + offs_n[None, :, None] * stride_wn
             + current_k[None, None, :] * stride_wk,
-            mask=(offs_n[None, :, None] < num_cols) & k_mask[None, None, :],
+            mask=row_mask[:, None, None] & (offs_n[None, :, None] < num_cols) & k_mask[None, None, :],
             other=0.0,
         ).to(tl.float32)
         acc += tl.sum(a[:, None, :] * b, axis=2)
@@ -217,6 +218,78 @@ def _grouped_expert_gemm_packed(
         out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
         acc,
         mask=row_mask[:, None] & (offs_n[None, :] < num_cols),
+    )
+
+
+@triton.jit
+def _grouped_expert_gemm_packed_aligned(
+    a_ptr,
+    sorted_slot_ids_ptr,
+    expert_block_ids_ptr,
+    w_ptr,
+    out_ptr,
+    num_slots,
+    num_padded_slots,
+    num_cols,
+    k_dim,
+    num_local_experts,
+    stride_am,
+    stride_ak,
+    stride_s,
+    stride_b,
+    stride_we,
+    stride_wn,
+    stride_wk,
+    stride_om,
+    stride_on,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    row_mask = offs_m < num_padded_slots
+
+    slot_ids = tl.load(
+        sorted_slot_ids_ptr + offs_m * stride_s,
+        mask=row_mask,
+        other=num_slots,
+    ).to(tl.int32)
+    expert_id = tl.load(
+        expert_block_ids_ptr + pid_m * stride_b,
+        mask=pid_m >= 0,
+        other=-1,
+    ).to(tl.int32)
+    valid_rows = row_mask & (slot_ids >= 0) & (slot_ids < num_slots) & (expert_id >= 0) & (expert_id < num_local_experts)
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    k_offsets = tl.arange(0, BLOCK_K)
+
+    for k_start in range(0, k_dim, BLOCK_K):
+        current_k = k_start + k_offsets
+        k_mask = current_k < k_dim
+        a = tl.load(
+            a_ptr + slot_ids[:, None] * stride_am + current_k[None, :] * stride_ak,
+            mask=valid_rows[:, None] & k_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        b = tl.load(
+            w_ptr
+            + expert_id * stride_we
+            + offs_n[:, None] * stride_wn
+            + current_k[None, :] * stride_wk,
+            mask=(expert_id >= 0) & (expert_id < num_local_experts) & (offs_n[:, None] < num_cols) & k_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        acc += tl.dot(a, tl.trans(b))
+
+    tl.store(
+        out_ptr + slot_ids[:, None] * stride_om + offs_n[None, :] * stride_on,
+        acc,
+        mask=valid_rows[:, None] & (offs_n[None, :] < num_cols),
     )
 
 
@@ -279,25 +352,25 @@ def _pack_fused_moe_inputs(
     num_local_experts: int,
     local_expert_start: int,
     block_m: int,
-) -> PackedMoEInputs:
+) -> ExpertExecutionMetadata:
     num_tokens, hidden_size = hidden_states.shape
     del hidden_size
     top_k = topk_ids.shape[1]
+    num_slots = num_tokens * top_k
+
+    if num_slots == 0:
+        empty_i32 = torch.empty((0,), device=hidden_states.device, dtype=torch.int32)
+        empty_w = torch.empty((0,), device=hidden_states.device, dtype=topk_weights.dtype)
+        return ExpertExecutionMetadata(
+            packed_token_ids=empty_i32,
+            packed_local_expert_ids=empty_i32,
+            packed_weights=empty_w,
+            num_slots=0,
+        )
 
     local_ids = topk_ids.to(torch.int32) - int(local_expert_start)
     local_mask = (local_ids >= 0) & (local_ids < num_local_experts)
     flat_valid_mask = local_mask.reshape(-1)
-
-    if not bool(flat_valid_mask.any().item()):
-        empty_i32 = torch.empty((0,), device=hidden_states.device, dtype=torch.int32)
-        empty_w = torch.empty((0,), device=hidden_states.device, dtype=topk_weights.dtype)
-        return PackedMoEInputs(
-            packed_token_ids=empty_i32,
-            packed_weights=empty_w,
-            expert_block_ids=empty_i32,
-            num_valid_slots=0,
-            num_padded_slots=0,
-        )
 
     flat_local_ids = local_ids.reshape(-1)
     flat_token_ids = (
@@ -308,129 +381,121 @@ def _pack_fused_moe_inputs(
     )
     flat_weights = topk_weights.reshape(-1)
 
-    valid_local_ids = flat_local_ids[flat_valid_mask]
-    valid_token_ids = flat_token_ids[flat_valid_mask]
-    valid_weights = flat_weights[flat_valid_mask]
-
-    sort_order = torch.argsort(valid_local_ids)
-    sorted_local_ids = valid_local_ids[sort_order]
-    sorted_token_ids = valid_token_ids[sort_order]
-    sorted_weights = valid_weights[sort_order]
-
-    counts = torch.bincount(sorted_local_ids.to(torch.int64), minlength=num_local_experts)
-    padded_counts = ((counts + block_m - 1) // block_m) * block_m
-    num_valid_slots = int(sorted_local_ids.numel())
-    num_padded_slots = int(padded_counts.sum().item())
-    num_expert_blocks = num_padded_slots // block_m
-
     packed_token_ids = _get_workspace_tensor(
         "packed_token_ids",
-        (num_padded_slots,),
+        (num_slots,),
         dtype=torch.int32,
         device=hidden_states.device,
-        fill_value=-1,
+    )
+    packed_local_expert_ids = _get_workspace_tensor(
+        "packed_local_expert_ids",
+        (num_slots,),
+        dtype=torch.int32,
+        device=hidden_states.device,
     )
     packed_weights = _get_workspace_tensor(
         "packed_weights",
-        (num_padded_slots,),
+        (num_slots,),
         dtype=topk_weights.dtype,
         device=hidden_states.device,
-        zero=True,
     )
-    expert_block_ids = _get_workspace_tensor(
-        "expert_block_ids",
-        (num_expert_blocks,),
-        dtype=torch.int32,
-        device=hidden_states.device,
+    packed_token_ids.copy_(torch.where(flat_valid_mask, flat_token_ids, torch.full_like(flat_token_ids, -1)))
+    packed_local_expert_ids.copy_(
+        torch.where(flat_valid_mask, flat_local_ids, torch.zeros_like(flat_local_ids))
     )
-    offsets = _get_workspace_tensor(
-        "expert_offsets",
-        (num_local_experts,),
-        dtype=torch.int64,
-        device=hidden_states.device,
-    )
-    dst_positions = _get_workspace_tensor(
-        "dst_positions",
-        (num_valid_slots,),
-        dtype=torch.int64,
-        device=hidden_states.device,
+    packed_weights.copy_(
+        torch.where(flat_valid_mask, flat_weights, torch.zeros_like(flat_weights))
     )
 
-    offsets.copy_(torch.cumsum(padded_counts.to(torch.int64), dim=0) - padded_counts.to(torch.int64))
-    expert_block_ids.copy_(
-        torch.repeat_interleave(
-            torch.arange(num_local_experts, device=hidden_states.device, dtype=torch.int32),
-            (padded_counts // block_m).to(torch.int64),
-            output_size=num_expert_blocks,
-        )
-    )
-
-    segment_start_flags = _get_workspace_tensor(
-        "segment_start_flags",
-        (num_valid_slots,),
-        dtype=torch.bool,
-        device=hidden_states.device,
-    )
-    segment_start_flags.fill_(False)
-    segment_start_flags[0] = True
-    segment_start_flags[1:] = sorted_local_ids[1:] != sorted_local_ids[:-1]
-    segment_starts = torch.nonzero(segment_start_flags, as_tuple=False).flatten().to(torch.int64)
-    repeated_starts = torch.repeat_interleave(
-        segment_starts,
-        counts[counts > 0].to(torch.int64),
-        output_size=num_valid_slots,
-    )
-    dst_positions.copy_(torch.arange(num_valid_slots, device=hidden_states.device, dtype=torch.int64))
-    dst_positions.sub_(repeated_starts)
-    dst_positions.add_(offsets[sorted_local_ids.to(torch.int64)])
-
-    packed_token_ids[dst_positions] = sorted_token_ids
-    packed_weights[dst_positions] = sorted_weights
-
-    return PackedMoEInputs(
+    return ExpertExecutionMetadata(
         packed_token_ids=packed_token_ids,
+        packed_local_expert_ids=packed_local_expert_ids,
         packed_weights=packed_weights,
-        expert_block_ids=expert_block_ids,
-        num_valid_slots=num_valid_slots,
-        num_padded_slots=num_padded_slots,
+        num_slots=num_slots,
     )
+
+
+def _build_aligned_block_metadata(
+    packed_local_expert_ids: torch.Tensor,
+    *,
+    block_size: int,
+    num_local_experts: int,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, int | None]:
+    if packed_local_expert_ids.numel() == 0 or sgl_moe_align_block_size is None:
+        return None, None, None
+    topk_ids = packed_local_expert_ids[:, None].contiguous()
+    num_slots = int(topk_ids.numel())
+    max_num_tokens_padded = num_slots + (num_local_experts + 1) * (block_size - 1)
+    sorted_slot_ids = torch.empty(
+        (max_num_tokens_padded,),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+    )
+    expert_block_ids = torch.empty(
+        (triton.cdiv(max_num_tokens_padded, block_size),),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+    )
+    num_tokens_post_pad = torch.empty(
+        (1,),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+    )
+    cumsum_buffer = torch.empty(
+        (num_local_experts + 2,),
+        dtype=torch.int32,
+        device=packed_local_expert_ids.device,
+    )
+    sgl_moe_align_block_size(
+        topk_ids,
+        num_local_experts + 1,
+        block_size,
+        sorted_slot_ids,
+        expert_block_ids,
+        num_tokens_post_pad,
+        cumsum_buffer,
+        True,
+    )
+    total = int(num_tokens_post_pad.item())
+    num_blocks = triton.cdiv(total, block_size)
+    return sorted_slot_ids[:total].contiguous(), expert_block_ids[:num_blocks].contiguous(), total
 
 
 def _launch_grouped_expert_gemm_gathered(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
-    packed_inputs: PackedMoEInputs,
+    packed_inputs: ExpertExecutionMetadata,
     *,
     num_cols: int,
     k_dim: int,
 ) -> torch.Tensor:
     packed_out = _get_workspace_tensor(
         "gate_up",
-        (packed_inputs.num_padded_slots, num_cols),
+        (packed_inputs.num_slots, num_cols),
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
-    if packed_inputs.num_padded_slots == 0:
+    if packed_inputs.num_slots == 0:
         return packed_out
 
     block_m = PACKED_BLOCK_M
     block_n = 64 if num_cols >= 64 else triton.next_power_of_2(num_cols)
     block_k = 32 if k_dim >= 32 else triton.next_power_of_2(k_dim)
     _grouped_expert_gemm_gathered[
-        (triton.cdiv(packed_inputs.num_padded_slots, block_m), triton.cdiv(num_cols, block_n))
+        (triton.cdiv(packed_inputs.num_slots, block_m), triton.cdiv(num_cols, block_n))
     ](
         hidden_states,
         packed_inputs.packed_token_ids,
-        packed_inputs.expert_block_ids,
+        packed_inputs.packed_local_expert_ids,
         w,
         packed_out,
-        packed_inputs.num_padded_slots,
+        packed_inputs.num_slots,
         num_cols,
         k_dim,
         hidden_states.stride(0),
         hidden_states.stride(1),
         packed_inputs.packed_token_ids.stride(0),
-        packed_inputs.expert_block_ids.stride(0),
+        packed_inputs.packed_local_expert_ids.stride(0),
         w.stride(0),
         w.stride(1),
         w.stride(2),
@@ -447,36 +512,71 @@ def _launch_grouped_expert_gemm_gathered(
 def _launch_grouped_expert_gemm_packed(
     packed_hidden_states: torch.Tensor,
     w: torch.Tensor,
-    packed_inputs: PackedMoEInputs,
+    packed_inputs: ExpertExecutionMetadata,
     *,
     num_cols: int,
     k_dim: int,
+    workspace_name: str = "packed_slot_outputs",
 ) -> torch.Tensor:
     packed_out = _get_workspace_tensor(
-        "packed_slot_outputs",
-        (packed_inputs.num_padded_slots, num_cols),
+        workspace_name,
+        (packed_inputs.num_slots, num_cols),
         dtype=packed_hidden_states.dtype,
         device=packed_hidden_states.device,
     )
-    if packed_inputs.num_padded_slots == 0:
+    if packed_inputs.num_slots == 0:
         return packed_out
 
     block_m = PACKED_BLOCK_M
     block_n = 64 if num_cols >= 64 else triton.next_power_of_2(num_cols)
     block_k = 32 if k_dim >= 32 else triton.next_power_of_2(k_dim)
+    if (
+        packed_inputs.sorted_slot_ids is not None
+        and packed_inputs.expert_block_ids is not None
+        and packed_inputs.num_tokens_post_padded is not None
+    ):
+        _grouped_expert_gemm_packed_aligned[
+            (triton.cdiv(packed_inputs.num_tokens_post_padded, block_m), triton.cdiv(num_cols, block_n))
+        ](
+            packed_hidden_states,
+            packed_inputs.sorted_slot_ids,
+            packed_inputs.expert_block_ids,
+            w,
+            packed_out,
+            packed_inputs.num_slots,
+            packed_inputs.num_tokens_post_padded,
+            num_cols,
+            k_dim,
+            w.shape[0],
+            packed_hidden_states.stride(0),
+            packed_hidden_states.stride(1),
+            packed_inputs.sorted_slot_ids.stride(0),
+            packed_inputs.expert_block_ids.stride(0),
+            w.stride(0),
+            w.stride(1),
+            w.stride(2),
+            packed_out.stride(0),
+            packed_out.stride(1),
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            num_warps=4,
+        )
+        return packed_out
+
     _grouped_expert_gemm_packed[
-        (triton.cdiv(packed_inputs.num_padded_slots, block_m), triton.cdiv(num_cols, block_n))
+        (triton.cdiv(packed_inputs.num_slots, block_m), triton.cdiv(num_cols, block_n))
     ](
         packed_hidden_states,
-        packed_inputs.expert_block_ids,
+        packed_inputs.packed_local_expert_ids,
         w,
         packed_out,
-        packed_inputs.num_padded_slots,
+        packed_inputs.num_slots,
         num_cols,
         k_dim,
         packed_hidden_states.stride(0),
         packed_hidden_states.stride(1),
-        packed_inputs.expert_block_ids.stride(0),
+        packed_inputs.packed_local_expert_ids.stride(0),
         w.stride(0),
         w.stride(1),
         w.stride(2),
@@ -492,7 +592,7 @@ def _launch_grouped_expert_gemm_packed(
 
 def _combine_packed_moe_outputs(
     packed_slot_outputs: torch.Tensor,
-    packed_inputs: PackedMoEInputs,
+    packed_inputs: ExpertExecutionMetadata,
     *,
     num_tokens: int,
 ) -> torch.Tensor:
@@ -503,19 +603,19 @@ def _combine_packed_moe_outputs(
         device=packed_slot_outputs.device,
         zero=True,
     )
-    if packed_inputs.num_valid_slots == 0:
+    if packed_inputs.num_slots == 0:
         return combined_output.to(packed_slot_outputs.dtype)
 
     block_m = PACKED_BLOCK_M
     block_n = 64 if packed_slot_outputs.shape[1] >= 64 else triton.next_power_of_2(packed_slot_outputs.shape[1])
     _weighted_scatter_add[
-        (triton.cdiv(packed_inputs.num_padded_slots, block_m), triton.cdiv(packed_slot_outputs.shape[1], block_n))
+        (triton.cdiv(packed_inputs.num_slots, block_m), triton.cdiv(packed_slot_outputs.shape[1], block_n))
     ](
         packed_slot_outputs,
         packed_inputs.packed_token_ids,
         packed_inputs.packed_weights,
         combined_output,
-        packed_inputs.num_padded_slots,
+        packed_inputs.num_slots,
         packed_slot_outputs.shape[1],
         packed_slot_outputs.stride(0),
         packed_slot_outputs.stride(1),
@@ -569,8 +669,6 @@ def _launch_fused_moe_kernels(
         local_expert_start=local_expert_start,
         block_m=PACKED_BLOCK_M,
     )
-    if packed_inputs.num_valid_slots == 0:
-        return hidden_states.new_zeros((num_tokens, w2.shape[1]))
 
     gate_up = _launch_grouped_expert_gemm_gathered(
         hidden_states,
@@ -617,3 +715,70 @@ def fused_moe(
         local_expert_start=local_expert_start,
         hidden_act=hidden_act,
     )
+
+
+def fused_expert_packed(
+    hidden_states: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    execution_metadata: ExpertExecutionMetadata,
+    *,
+    hidden_act: str = "silu",
+) -> torch.Tensor:
+    hidden_states = hidden_states.contiguous()
+    if hidden_states.shape[0] == 0:
+        return hidden_states.new_empty((0, w2.shape[1]))
+    _validate_fused_moe_inputs(
+        hidden_states=hidden_states,
+        w13=w13,
+        w2=w2,
+        topk_ids=execution_metadata.packed_local_expert_ids[:, None],
+        topk_weights=execution_metadata.packed_weights[:, None],
+        hidden_act=hidden_act,
+    )
+    num_local_experts = w13.shape[0]
+    if execution_metadata.disable_aligned_metadata:
+        sorted_slot_ids = None
+        expert_block_ids = None
+        num_tokens_post_padded = None
+    else:
+        sorted_slot_ids, expert_block_ids, num_tokens_post_padded = _build_aligned_block_metadata(
+            execution_metadata.packed_local_expert_ids,
+            block_size=PACKED_BLOCK_M,
+            num_local_experts=num_local_experts,
+        )
+    packed_inputs = ExpertExecutionMetadata(
+        packed_token_ids=execution_metadata.packed_token_ids,
+        packed_local_expert_ids=execution_metadata.packed_local_expert_ids,
+        packed_weights=execution_metadata.packed_weights,
+        num_slots=execution_metadata.num_slots,
+        seg_indptr=execution_metadata.seg_indptr,
+        num_recv_tokens_per_expert=execution_metadata.num_recv_tokens_per_expert,
+        sorted_slot_ids=sorted_slot_ids,
+        expert_block_ids=expert_block_ids,
+        num_tokens_post_padded=num_tokens_post_padded,
+        disable_aligned_metadata=execution_metadata.disable_aligned_metadata,
+    )
+    hidden_size = hidden_states.shape[1]
+    intermediate_twice = w13.shape[1]
+    intermediate_size = intermediate_twice // 2
+    gate_up = _launch_grouped_expert_gemm_packed(
+        hidden_states,
+        w13,
+        packed_inputs,
+        num_cols=intermediate_twice,
+        k_dim=hidden_size,
+        workspace_name="packed_gate_up",
+    )
+    gate = gate_up[:, :intermediate_size]
+    up = gate_up[:, intermediate_size:]
+    F.silu(gate, inplace=True)
+    gate.mul_(up)
+    return _launch_grouped_expert_gemm_packed(
+        gate,
+        w2,
+        packed_inputs,
+        num_cols=w2.shape[1],
+        k_dim=intermediate_size,
+        workspace_name="packed_slot_outputs",
+    ).to(hidden_states.dtype)

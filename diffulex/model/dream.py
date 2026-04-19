@@ -10,7 +10,7 @@ from diffulex.model.auto_model import AutoModelForDiffusionLM
 from diffulex.model.config.dream.configuration_dream import DreamConfig
 from diffulex.layer.linear import RowParallelLinear, ColumnParallelLinear
 from diffulex.layer.embed_head import VocabParallelEmbedding, ParallelLMHead
-from diffulex.utils.parallelism import get_tp_world_size
+from diffulex.distributed.parallel_state import fetch_parallel_state
 
 
 if os.environ.get("TRITON_INTERPRET", None) == "1":
@@ -40,7 +40,8 @@ class DreamAttention(nn.Module):
         rope_scaling: tuple | None = None,
     ) -> None:
         super().__init__()
-        tp_size = get_tp_world_size()
+        parallel_state = fetch_parallel_state()
+        tp_size = parallel_state.get_tp_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size

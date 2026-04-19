@@ -59,68 +59,30 @@ class BenchmarkRunner:
         """
         start_time = time.time()
 
-        # Check if it's a DP worker (has _ask method) or TP worker
-        if hasattr(self.llm, "_ask"):
-            # DP worker: wait for all child processes to be ready
-            # by sending a lightweight command to each
-            dp_size = getattr(self.llm, "dp_size", 1)
-            self.logger.info(
-                f"[DiffulexDPWorker (DP={dp_size})]: Waiting for {dp_size} DiffulexTPWorker subprocesses to be ready..."
-            )
+        if hasattr(self.llm, "ps") and self.llm.ps:
+            num_subprocesses = len(self.llm.ps)
+            self.logger.info(f"Waiting for {num_subprocesses} engine subprocess(es) to be ready...")
 
             while time.time() - start_time < timeout:
-                try:
-                    # Try to send a lightweight command to check readiness
-                    # Use is_finished as a lightweight check
-                    for i in range(dp_size):
-                        self.llm._ask(i, "is_finished")
-                    self.logger.success("All DiffulexTPWorker subprocesses are ready")
+                all_alive = all(p.is_alive() for p in self.llm.ps)
+
+                if all_alive:
+                    time.sleep(2.0)
+                    self.logger.success("All engine subprocesses are ready")
                     return
-                except (EOFError, RuntimeError, AttributeError, ConnectionError) as e:
-                    # Process not ready yet, wait and retry
-                    elapsed = time.time() - start_time
-                    if elapsed < timeout:
-                        time.sleep(check_interval)
-                    else:
-                        raise RuntimeError(
-                            f"Timeout waiting for DP workers to be ready after {elapsed:.1f}s: {e}"
-                        ) from e
-        else:
-            # TP worker: wait for all subprocesses to be ready
-            # Check if subprocesses are alive and wait a bit for initialization
-            if hasattr(self.llm, "ps") and self.llm.ps:
-                num_subprocesses = len(self.llm.ps)
-                self.logger.info(f"Waiting for {num_subprocesses} TP subprocess(es) to be ready...")
 
-                while time.time() - start_time < timeout:
-                    # Check if all subprocesses are alive
-                    all_alive = all(p.is_alive() for p in self.llm.ps)
+                dead_processes = [i for i, p in enumerate(self.llm.ps) if not p.is_alive()]
+                exit_codes = [self.llm.ps[i].exitcode for i in dead_processes]
+                raise RuntimeError(
+                    f"Engine subprocess(es) {dead_processes} terminated during initialization. "
+                    f"Exit code(s): {exit_codes}"
+                )
 
-                    if all_alive:
-                        # Give subprocesses a bit more time to complete initialization
-                        # The main process initialization is synchronous, but subprocesses
-                        # may still be initializing (model loading, warmup, etc.)
-                        # Subprocesses will synchronize via barrier in ModelRunnerBase.__init__
-                        # So we just need to wait a bit for them to complete initialization
-                        time.sleep(2.0)  # Wait a bit for subprocess initialization
-                        self.logger.success("All TP subprocesses are ready")
-                        return
-                    else:
-                        # Some process died, check which one
-                        dead_processes = [i for i, p in enumerate(self.llm.ps) if not p.is_alive()]
-                        exit_codes = [self.llm.ps[i].exitcode for i in dead_processes]
-                        raise RuntimeError(
-                            f"TP subprocess(es) {dead_processes} terminated during initialization. "
-                            f"Exit code(s): {exit_codes}"
-                        )
+            elapsed = time.time() - start_time
+            raise RuntimeError(f"Timeout waiting for engine subprocesses to be ready after {elapsed:.1f}s")
 
-                elapsed = time.time() - start_time
-                raise RuntimeError(f"Timeout waiting for TP subprocesses to be ready after {elapsed:.1f}s")
-            else:
-                # Single process TP worker, should be ready immediately
-                # Main process initialization is synchronous
-                self.logger.success("TP worker is ready")
-                return
+        self.logger.success("Engine is ready")
+        return
 
     def generate(
         self,

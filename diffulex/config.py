@@ -2,6 +2,7 @@ import os
 
 from dataclasses import dataclass, field
 from transformers import AutoConfig
+from diffulex.distributed.parallel_state import get_world_size
 from diffulex.logger import get_logger
 
 logger = get_logger(__name__)
@@ -59,6 +60,7 @@ class Config:
     expert_parallel_size: int = 1
     master_addr: str = "localhost"
     master_port: int = 2333
+    distributed_timeout_seconds: int = 600
     shm_name: str = "diffulex_shm"
     device_start: int = 0
     device_ids: list[int] = field(default_factory=lambda: [])
@@ -72,6 +74,9 @@ class Config:
     num_pages: int = -1
     k_cache_hdim_split_factor_x: int = 8
     kv_cache_layout: str = "unified"  # "unified" or "distinct"
+    moe_dispatcher_backend: str = "standard"  # "standard", "naive", or "deepep"
+    deepep_mode: str = "auto"  # "normal", "low_latency", or "auto"
+    deepep_num_max_dispatch_tokens_per_rank: int = 256
 
     def _validate_sampling_mode(self) -> None:
         if self.sampling_mode == "edit" and self.model_name not in EDIT_SAMPLING_MODEL_NAMES:
@@ -170,11 +175,42 @@ class Config:
                 "kv_cache_layout must be one of {'unified', 'distinct'}, "
                 f"got: {self.kv_cache_layout}"
             )
+        if self.moe_dispatcher_backend not in {"standard", "naive", "deepep"}:
+            raise ValueError(
+                "moe_dispatcher_backend must be one of {'standard', 'naive', 'deepep'}, "
+                f"got: {self.moe_dispatcher_backend}"
+            )
+        if self.deepep_mode not in {"normal", "low_latency", "auto"}:
+            raise ValueError(
+                "deepep_mode must be one of {'normal', 'low_latency', 'auto'}, "
+                f"got: {self.deepep_mode}"
+            )
+        if self.deepep_num_max_dispatch_tokens_per_rank <= 0:
+            raise ValueError(
+                "deepep_num_max_dispatch_tokens_per_rank must be positive, "
+                f"got: {self.deepep_num_max_dispatch_tokens_per_rank}"
+            )
+        if self.moe_dispatcher_backend == "standard" and self.expert_parallel_size != 1:
+            logger.warning(
+                "Ignoring expert_parallel_size=%s for moe_dispatcher_backend='standard'. "
+                "Standard TP MoE does not use EP token A2A; experts are sharded by tensor_parallel_size.",
+                self.expert_parallel_size,
+            )
+            self.expert_parallel_size = 1
             
         if not (isinstance(self.master_port, int) and 0 < self.master_port < 65536):
             raise ValueError(
                 "master_port must be an int in (0, 65536), "
                 f"got: {self.master_port}"
+            )
+
+        if not (
+            isinstance(self.distributed_timeout_seconds, int)
+            and self.distributed_timeout_seconds > 0
+        ):
+            raise ValueError(
+                "distributed_timeout_seconds must be a positive int, "
+                f"got: {self.distributed_timeout_seconds}"
             )
             
             
@@ -214,6 +250,17 @@ class Config:
             self.device_ids = list(range(torch.cuda.device_count()))
             logger.info(f"Using CUDA devices: {self.device_ids}")
 
+        required_world_size = get_world_size(
+            self.tensor_parallel_size,
+            self.expert_parallel_size,
+            self.data_parallel_size,
+        )
+        if len(self.device_ids) < required_world_size:
+            raise ValueError(
+                "Requested parallel world size exceeds available CUDA devices, "
+                f"required={required_world_size}, device_ids={self.device_ids}."
+            )
+
         # Build decoding_thresholds: dict or flat keys -> DecodingThresholds
         d = self.__dict__
         if isinstance(self.decoding_thresholds, dict):
@@ -247,7 +294,7 @@ class Config:
 
     @property
     def kv_cache_page_size(self) -> int:
-        """Alias for page_size, used by engine/model_runner/tp_worker."""
+        """Alias for page_size, used by engine/model_runner."""
         return self.page_size
 
     @property

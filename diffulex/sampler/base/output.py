@@ -27,3 +27,34 @@ class SampleOutputBase:
         for req_id_str in req_ids:
             edit_writes_map.setdefault(req_id_str, {})
         self.edit_writes_map = edict(edit_writes_map)
+
+
+def merge_sample_outputs(outputs: list[SampleOutputBase | None]) -> SampleOutputBase:
+    true_local_ids_map: dict[str, dict[str, list[int]]] = {}
+    accepted_ids_map: dict[str, dict[str, list[int]]] = {}
+    sampled_tokens_map: dict[str, dict[str, list[int]]] = {}
+    mask_token_rel_ids_map: dict[str, dict[str, list[int]]] = {}
+    confidence_map: dict[str, dict[str, list[float]]] = {}
+    initial_confidence_map: dict[str, dict[str, list[float]]] = {}
+    edit_writes_map: dict[str, dict[str, dict[int, int]]] = {}
+
+    for output in outputs:
+        if output is None:
+            continue
+        true_local_ids_map.update(dict(output.true_local_ids_map))
+        accepted_ids_map.update(dict(output.accepted_ids_map))
+        sampled_tokens_map.update(dict(output.sampled_tokens_map))
+        mask_token_rel_ids_map.update(dict(output.mask_token_rel_ids_map))
+        confidence_map.update(dict(output.confidence_map))
+        initial_confidence_map.update(dict(output.initial_confidence_map))
+        edit_writes_map.update(dict(output.edit_writes_map))
+
+    return SampleOutputBase(
+        true_local_ids_map=true_local_ids_map,
+        accepted_ids_map=accepted_ids_map,
+        sampled_tokens_map=sampled_tokens_map,
+        mask_token_rel_ids_map=mask_token_rel_ids_map,
+        confidence_map=confidence_map,
+        initial_confidence_map=initial_confidence_map,
+        edit_writes_map=edit_writes_map,
+    )

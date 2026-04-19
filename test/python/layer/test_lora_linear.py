@@ -2,20 +2,21 @@ import copy
 
 import torch
 
+import diffulex.distributed.parallel_state as parallel_state
 from diffulex.layer.linear import ColumnParallelLinear, ReplicatedLinear, RowParallelLinear
-from diffulex.utils import parallelism
 
 
 def _mock_tp(monkeypatch) -> None:
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
-    parallelism.reset_model_parallelism_metadata()
+    parallel_state.reset_parallel_state()
     monkeypatch.setattr(
-        parallelism,
-        "_MODEL_PARALLELISM_METADATA",
-        parallelism.ModelParallelismMetadata.from_world(
+        parallel_state,
+        "PARALLEL_STATE",
+        parallel_state.build_parallel_state_for_test(
             tp_size=1,
             ep_size=1,
+            dp_size=1,
             world_size=1,
             global_rank=0,
         ),

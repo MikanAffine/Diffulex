@@ -50,6 +50,8 @@ class Attention(nn.Module):
         q = rearrange(q, "s (nh hd) -> s nh hd", **self.q_shape)
         k = rearrange(k, "s (nkvh hd) -> s nkvh hd", **self.kv_shape)
         v = rearrange(v, "s (nkvh hd) -> s nkvh hd", **self.kv_shape)
+        if q.shape[0] == 0:
+            return rearrange(q, "s nh hd -> s (nh hd)").contiguous()
 
         attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
         k_cache, v_cache = self.k_cache, self.v_cache

@@ -1,14 +1,15 @@
 from types import SimpleNamespace
 
+import diffulex.distributed.parallel_state as parallel_state
 from diffulex.model.llada import LLaDABlock
-from diffulex.utils import parallelism
 
 
 def _mock_single_rank():
-    parallelism.reset_model_parallelism_metadata()
-    parallelism._MODEL_PARALLELISM_METADATA = parallelism.ModelParallelismMetadata.from_world(
+    parallel_state.reset_parallel_state()
+    parallel_state.PARALLEL_STATE = parallel_state.build_parallel_state_for_test(
         tp_size=1,
         ep_size=1,
+        dp_size=1,
         world_size=1,
         global_rank=0,
     )

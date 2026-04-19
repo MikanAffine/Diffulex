@@ -17,9 +17,9 @@ logger = get_logger(__name__)
 
 def default_engine_factory(model: str, **engine_kwargs):
     from diffulex import strategy as _strategy  # noqa: F401
-    from diffulex.engine.tp_worker import DiffulexTPWorker
+    from diffulex.engine.engine import DiffulexEngine
 
-    return DiffulexTPWorker(model, **engine_kwargs)
+    return DiffulexEngine(model, **engine_kwargs)
 
 
 class SyncBackendWorker:

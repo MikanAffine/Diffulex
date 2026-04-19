@@ -3,30 +3,30 @@ from __future__ import annotations
 from typing import Any
 
 
-_MISSING = object()
+MISSING = object()
 
 
-def _read_external_attr(config: Any, names: tuple[str, ...], default: Any = _MISSING) -> Any:
+def _read_external_attr(config: Any, names: tuple[str, ...], default: Any = MISSING) -> Any:
     for name in names:
-        value = getattr(config, name, _MISSING)
-        if value is not _MISSING and value is not None:
+        value = getattr(config, name, MISSING)
+        if value is not MISSING and value is not None:
             return value
 
-    if default is _MISSING:
+    if default is MISSING:
         joined = ", ".join(names)
         raise AttributeError(f"Config does not define any of: {joined}.")
     return default
 
 
-def _read_external_int(config: Any, names: tuple[str, ...], default: int | object = _MISSING) -> int:
+def _read_external_int(config: Any, names: tuple[str, ...], default: int | object = MISSING) -> int:
     return int(_read_external_attr(config, names, default))
 
 
-def _read_external_float(config: Any, names: tuple[str, ...], default: float | object = _MISSING) -> float:
+def _read_external_float(config: Any, names: tuple[str, ...], default: float | object = MISSING) -> float:
     return float(_read_external_attr(config, names, default))
 
 
-def _read_external_bool(config: Any, names: tuple[str, ...], default: bool | object = _MISSING) -> bool:
+def _read_external_bool(config: Any, names: tuple[str, ...], default: bool | object = MISSING) -> bool:
     return bool(_read_external_attr(config, names, default))
 
 

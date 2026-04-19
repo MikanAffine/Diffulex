@@ -10,18 +10,14 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from diffulex.config import Config
+from diffulex.distributed.parallel_state import fetch_parallel_state, init_parallel_state, init_process_group, reset_parallel_state
+from diffulex.sampler.base import merge_sample_outputs
 from diffulex.sampler import AutoSampler
 from diffulex.engine.request import DllmReq
 from diffulex.attention.metadata import set_warming_up, reset_warming_up
 from diffulex.model import AutoModelForDiffusionLM
 from diffulex.engine.strategy_registry import DiffulexStrategyRegistry
 from diffulex.logger import get_logger
-from diffulex.utils.parallelism import (
-    get_tp_world_size,
-    init_model_parallelism_metadata,
-    init_process_group,
-    reset_model_parallelism_metadata,
-)
 
 
 logger = get_logger(__name__)
@@ -54,17 +50,44 @@ class ModelRunnerBase(
         init_process_group(
             tp_size=config.tensor_parallel_size,
             ep_size=config.expert_parallel_size,
+            dp_size=config.data_parallel_size,
             rank=rank,
             init_method=init_method,
             device_id=device_id,
             backend="nccl",
+            timeout_seconds=config.distributed_timeout_seconds,
         )
-        layout = init_model_parallelism_metadata(
+        parallel_state = init_parallel_state(
             tp_size=config.tensor_parallel_size,
             ep_size=config.expert_parallel_size,
+            dp_size=config.data_parallel_size,
         )
-        self.world_size = layout.world_size
-        self.rank = layout.global_rank
+        a2a_requires_eager = (
+            config.moe_dispatcher_backend == "naive"
+            or (
+                config.moe_dispatcher_backend == "deepep"
+                and getattr(config, "deepep_mode", "auto") == "normal"
+            )
+        )
+        if a2a_requires_eager and not self.enforce_eager:
+            logger.warning(
+                "Forcing enforce_eager=True for this expert-parallel topology/backend "
+                "(tp_size=%s, dp_size=%s, ep_size=%s, moe_dispatcher_backend=%s, deepep_mode=%s).",
+                parallel_state.tp_size,
+                parallel_state.dp_size,
+                parallel_state.ep_size,
+                config.moe_dispatcher_backend,
+                getattr(config, "deepep_mode", "auto"),
+            )
+            self.enforce_eager = True
+            config.enforce_eager = True
+        self.world_size = parallel_state.world_size
+        self.rank = parallel_state.global_rank
+        self.dp_rank = parallel_state.dp_rank
+        self.dp_world_size = parallel_state.dp_size
+        self.cross_dp_ep = parallel_state.is_cross_dp_ep
+        self.model_parallel_rank = parallel_state.model_parallel_rank
+        self.is_model_parallel_root = self.model_parallel_rank == 0
         # Choose CUDA device for this TP rank.
         # config.device_ids is already a list of logical CUDA device indices (respecting CUDA_VISIBLE_DEVICES).
         # Do NOT add rank again, otherwise rank 1 with device_ids=[0,1] becomes device 2.
@@ -99,7 +122,7 @@ class ModelRunnerBase(
 
         torch.cuda.synchronize()
         dist.destroy_process_group()
-        reset_model_parallelism_metadata()
+        reset_parallel_state()
 
     def start_worker_loop(self):
         # Allocate shared memory for inter-process communication
@@ -171,6 +194,29 @@ class ModelRunnerBase(
         if evict_fn is not None:
             evict_fn(req_ids)
 
+    def filter_local_reqs(self, reqs: list[DllmReq]) -> list[DllmReq]:
+        if self.dp_world_size == 1:
+            return reqs
+        return [req for req in reqs if getattr(req, "dp_rank", 0) == self.dp_rank]
+
+    def gather_dp_sample_output(self, sample_output):
+        if self.dp_world_size == 1:
+            return sample_output if self.is_model_parallel_root else None
+
+        if not self.is_model_parallel_root:
+            return None
+
+        parallel_state = fetch_parallel_state()
+        dp_group = parallel_state.get_dp_group()
+        if dp_group is None:
+            return sample_output
+
+        gathered_outputs = [None] * self.dp_world_size if self.dp_rank == 0 else None
+        dist.gather_object(sample_output, gathered_outputs, dst=0, group=dp_group)
+        if self.dp_rank != 0:
+            return None
+        return merge_sample_outputs(gathered_outputs)
+
     @abstractmethod
     def _prefill_warmup(self):
         """Run template-specific prefill warmup."""
@@ -191,13 +237,14 @@ class ModelRunnerBase(
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        parallel_state = fetch_parallel_state()
         num_kv_heads = (
             getattr(
                 hf_config,
                 "num_key_value_heads",
                 getattr(hf_config, "n_kv_heads", None),
             )
-            // get_tp_world_size()
+            // parallel_state.get_tp_world_size()
         )
 
         if hasattr(hf_config, "head_dim"):
@@ -280,6 +327,8 @@ class ModelRunnerBase(
             )
 
     def prepare_page_tables(self, reqs: list[DllmReq]):
+        if not reqs:
+            return torch.empty((0, 1), dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         max_len = max(len(req.page_table) for req in reqs)
         page_tables = [req.page_table + [-1] * (max_len - len(req.page_table)) for req in reqs]
         page_tables = torch.tensor(page_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)

@@ -31,11 +31,15 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
 
         for req in reqs:
             req.init_multi_block(self.config)
-            req.status = DllmReqStatus.PENDING  # so step() can transition to PREFILLING
+            req.make_pending()
+            req.dp_rank = self.dp_rank
+            req.step()
+            req.mark_execution_prepared()
 
         self.run(reqs)
 
         for req in reqs:
+            req.clear_execution_prepared()
             req.postprocess()
 
         torch.cuda.empty_cache()
@@ -159,7 +163,8 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         padded_prefix_lens_list: list[int] = []
 
         for req in reqs:
-            req.step()
+            if not req.is_execution_prepared:
+                req.step()
             prepared = self._prepare_prefill_req(req) if req.is_prefilling else self._prepare_decode_req(req)
             status_table.append(prepared["status"])
             prefix_lens_list.append(prepared["prefix_len"])
@@ -216,6 +221,47 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
             padded_prefix_lens=padded_prefix_lens_tensor,
         )
         return input_ids_tensor, positions_tensor
+
+    def prepare_idle_multi_block(self: ModelRunnerBase):
+        input_ids_tensor = torch.empty((0,), dtype=torch.int64).cuda(non_blocking=True)
+        positions_tensor = torch.empty((0,), dtype=torch.int64).cuda(non_blocking=True)
+        cu_seqlens_tensor = torch.zeros((1,), dtype=torch.int32).cuda(non_blocking=True)
+        empty_i32 = torch.empty((0,), dtype=torch.int32).cuda(non_blocking=True)
+        page_tables = torch.empty((0, 1), dtype=torch.int32).cuda(non_blocking=True)
+
+        self.set_attn_metadata(
+            is_prefill=[],
+            cu_seqlens_q=cu_seqlens_tensor,
+            cu_seqlens_k=cu_seqlens_tensor,
+            max_seqlen_q=0,
+            max_seqlen_k=0,
+            slot_mapping=empty_i32,
+            context_lens=empty_i32,
+            page_tables=page_tables,
+            page_size=self.page_size,
+            block_size=self.block_size,
+            kv_cache_layout=self.config.kv_cache_layout,
+        )
+        attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
+        attn_metadata.init_multi_block(
+            valid_slices=empty_i32,
+            buffer_size=self.config.buffer_size,
+            is_prefix_full=self.is_prefix_full,
+            status_table=empty_i32,
+            prefix_lens=empty_i32,
+            padded_prefix_lens=empty_i32,
+        )
+        return input_ids_tensor, positions_tensor
+
+    @torch.inference_mode()
+    def run_idle_multi_block(
+        self: ModelRunnerBase,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        # Idle ranks must enter model forward so EP dispatch/combine collectives
+        # see all participants, but they have no local logits to sample.
+        _ = self.model(input_ids, positions)
 
     @torch.inference_mode()
     def run_model_multi_block(
@@ -302,12 +348,20 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         return self._run_multi_block_subgroup(reqs)
 
     def _run_multi_block_subgroup(self: ModelRunnerBase, reqs: list[DllmReq]):
-        input_ids, positions = self.prepare_chunked_prefill_multi_block(reqs)
-        temperatures = self.prepare_sample(reqs) if self.rank == 0 else None
+        local_reqs = self.filter_local_reqs(reqs)
+        if not local_reqs:
+            if self.cross_dp_ep:
+                input_ids, positions = self.prepare_idle_multi_block()
+                self.run_idle_multi_block(input_ids, positions)
+                self.reset_attn_metadata()
+            return self.gather_dp_sample_output(None)
+
+        input_ids, positions = self.prepare_chunked_prefill_multi_block(local_reqs)
+        temperatures = self.prepare_sample(local_reqs) if self.is_model_parallel_root else None
         logits = self.run_model_multi_block(input_ids, positions)
-        sample_output = self.sampler(reqs, logits, temperatures) if self.rank == 0 else None
+        sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
         self.reset_attn_metadata()
-        return sample_output
+        return self.gather_dp_sample_output(sample_output)
 
     @torch.inference_mode()
     def capture_cudagraph_multi_block(self: ModelRunnerBase):

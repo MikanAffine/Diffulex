@@ -2,6 +2,7 @@ import os
 
 import torch
 import torch.nn as nn
+from einops import rearrange
 
 from diffulex.attention import Attention
 from diffulex.layer.layernorm import RMSNorm
@@ -11,7 +12,7 @@ from diffulex.layer.linear import RowParallelLinear, ColumnParallelLinear
 from diffulex.layer.embed_head import VocabParallelEmbedding, ParallelLMHead
 from diffulex.model.auto_model import AutoModelForDiffusionLM
 from diffulex.model.config.sdar.configuration_sdar import SDARConfig
-from diffulex.utils.parallelism import get_tp_world_size
+from diffulex.distributed.parallel_state import fetch_parallel_state
 
 
 if os.environ.get("TRITON_INTERPRET", None) == "1":
@@ -30,7 +31,8 @@ class SDARAttention(nn.Module):
 
     def __init__(self, config: SDARConfig) -> None:
         super().__init__()
-        tp_size = get_tp_world_size()
+        parallel_state = fetch_parallel_state()
+        tp_size = parallel_state.get_tp_world_size()
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -97,14 +99,18 @@ class SDARAttention(nn.Module):
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
 
-        # Per-head norm.
-        q_by_head = q.view(-1, self.num_heads, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
-
-        k_by_head = k.view(-1, self.num_kv_heads, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
+        q = rearrange(
+            self.q_norm(
+                rearrange(q, "token (head head_dim) -> token head head_dim", head=self.num_heads)
+            ),
+            "token head head_dim -> token (head head_dim)",
+        )
+        k = rearrange(
+            self.k_norm(
+                rearrange(k, "token (head head_dim) -> token head head_dim", head=self.num_kv_heads)
+            ),
+            "token head head_dim -> token (head head_dim)",
+        )
 
         q, k = self.rotary_emb(positions, q, k)
         o = self.attn(q, k, v, mask)

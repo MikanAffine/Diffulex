@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from diffulex.sampling_params import SamplingParams
 from diffulex.server.protocol import PromptInput
-from diffulex.mixin.async_engine.engine.serving_worker import (
+from diffulex.mixin.async_serving.engine import (
     ServingAbort,
     ServingCommand,
     ServingError,
@@ -28,16 +28,16 @@ class QueuedCommand:
 
 def default_engine_factory(model: str, **engine_kwargs):
     from diffulex import strategy as _strategy  # noqa: F401
-    from diffulex.engine.tp_worker import DiffulexTPWorker
+    from diffulex.engine.engine import DiffulexEngine
 
-    return DiffulexTPWorker(model, **engine_kwargs)
+    return DiffulexEngine(model, **engine_kwargs)
 
 
 class EngineLoop:
     """Single-owner background loop for online serving.
 
     The FastAPI event loop owns admission futures, while all engine calls run through
-    a one-worker executor. This keeps DiffulexTPWorker mutations serialized without
+    a one-worker executor. This keeps DiffulexEngine mutations serialized without
     blocking request admission while a model step is running.
     """
 
@@ -51,8 +51,6 @@ class EngineLoop:
     ) -> None:
         self.model = model
         self.engine_kwargs = dict(engine_kwargs or {})
-        if self.engine_kwargs.get("data_parallel_size", 1) != 1:
-            raise ValueError("Phase 1 HTTP serving supports data_parallel_size=1 only")
         self.engine_factory = engine_factory or default_engine_factory
         self.idle_sleep_s = idle_sleep_s
 
