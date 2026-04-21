@@ -17,3 +17,6 @@ class DMaxReq(TokenMergingMultiBlockReqTemplate):
         config: Config | None = None,
     ):
         super().__init__(token_ids, sampling_params)
+        if config is None:
+            raise ValueError("DMaxReq requires config to initialize token-merge state.")
+        self.init_token_merging_multi_block(config)
