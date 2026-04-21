@@ -11,22 +11,22 @@ engine:
   use_lora: false
   lora_path: ""
 
-  tensor_parallel_size: 4
+  tensor_parallel_size: 1
   data_parallel_size: 1
-  expert_parallel_size: 1
-  moe_dispatcher_backend: "standard"
+  expert_parallel_size: 2
+  moe_dispatcher_backend: "deepep"
   gpu_memory_utilization: 0.5
-  max_model_len: 512
-  max_num_batched_tokens: 512
+  max_model_len: 4096
+  max_num_batched_tokens: 2048
   max_num_reqs: 1
 
-  enforce_eager: true
+  enforce_eager: false
   kv_cache_layout: "unified"
 
   decoding_thresholds:
     add_block_threshold: 0.1
     semi_complete_threshold: 0.9
-    accept_threshold: 0.95
+    accept_threshold: 0.9
   block_size: 32
   page_size: 32
   buffer_size: 1
@@ -36,7 +36,7 @@ eval:
   dataset_split: "test"
   dataset_limit: 10
   temperature: 0.0
-  max_tokens: 256
+  max_tokens: 1024
   add_bos_token: true
   output_dir: "benchmark_results/llada2_mini_gsm8k_tp4_limit10"
   save_results: true

@@ -19,7 +19,7 @@ engine:
   max_num_batched_tokens: 4096
   max_num_reqs: 128
 
-  enforce_eager: true
+  enforce_eager: false
   enable_prefix_caching: true
   kv_cache_layout: "unified"
   page_size: 32
