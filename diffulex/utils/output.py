@@ -236,7 +236,6 @@ class GenerationOutputs:
             tpot=f"{self.tpot:.2f}s",
             ptps=f"{self.prefill_throughput:.2f}tok/s",
             dtps=f"{self.decode_throughput:.2f}tok/s",
-            tps=f"{self.throughput:.2f}tok/s",
         )
 
     def log_summary(self):
@@ -249,7 +248,6 @@ class GenerationOutputs:
         logger.info(f"TPF: {self.tpf:.2f} tok/step")
         logger.info(f"TTFT: {self.ttft:.2f} sec")
         logger.info(f"TPOT: {self.tpot:.2f} sec")
-        logger.info(f"Throughput: {self.throughput:.2f} tok/sec")
         logger.info(f"Prefill Throughput: {self.prefill_throughput:.2f} tok/sec")
         logger.info(f"Decode Throughput: {self.decode_throughput:.2f} tok/sec")
         logger.info("--------------------------------")
