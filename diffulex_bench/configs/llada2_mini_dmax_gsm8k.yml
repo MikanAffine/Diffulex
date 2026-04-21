@@ -35,7 +35,7 @@ engine:
     remask_threshold: 0.4
 
   block_size: 32
-  buffer_size: 4
+  buffer_size: 1
 
 eval:
   dataset_name: "gsm8k_diffulex"

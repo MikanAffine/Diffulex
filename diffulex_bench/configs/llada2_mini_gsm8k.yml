@@ -11,10 +11,11 @@ engine:
   use_lora: false
   lora_path: ""
 
-  tensor_parallel_size: 1
+  tensor_parallel_size: 2
   data_parallel_size: 1
-  expert_parallel_size: 2
-  moe_dispatcher_backend: "deepep"
+  expert_parallel_size: 1
+  moe_dispatcher_backend: "standard"
+  deepep_mode: "normal"
   gpu_memory_utilization: 0.5
   max_model_len: 4096
   max_num_batched_tokens: 2048

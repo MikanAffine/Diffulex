@@ -20,7 +20,7 @@ engine:
   max_num_batched_tokens: 1024
   max_num_reqs: 24
 
-  enforce_eager: true
+  enforce_eager: false
   kv_cache_layout: "unified"
 
   decoding_thresholds:

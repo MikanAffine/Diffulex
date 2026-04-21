@@ -223,6 +223,7 @@ class ModelRunnerBase(
         pass
 
     def warmup_model(self):
+        # TODO: attention metadata needs optimize for strategy awareness in warm-up
         logger.info("Warming up model...")
         set_warming_up(True)
         torch.cuda.empty_cache()
