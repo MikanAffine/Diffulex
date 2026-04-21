@@ -31,7 +31,6 @@ class DMaxModelRunner(TokenMergingMultiBlockModelRunnerTemplate):
         )
         self.mask_token_id = config.mask_token_id
         self.is_prefix_full = config.multi_block_prefix_full
-        config.enforce_eager = True
         super().__init__(config, rank, event)
 
     def prepare_prefill(self, reqs: list[DMaxReq]):
@@ -49,4 +48,4 @@ class DMaxModelRunner(TokenMergingMultiBlockModelRunnerTemplate):
 
     @torch.inference_mode()
     def capture_cudagraph(self):
-        return None
+        self.capture_cudagraph_token_merging_multi_block()

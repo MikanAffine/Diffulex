@@ -276,6 +276,15 @@ class LLaDA2Model(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        self.mask_token_id = int(getattr(config, "mask_token_id", -1))
+        if self.mask_token_id >= 0:
+            self.register_buffer(
+                "mask_token_id_tensor",
+                torch.tensor([self.mask_token_id], dtype=torch.int64),
+                persistent=False,
+            )
+        else:
+            self.register_buffer("mask_token_id_tensor", None, persistent=False)
         self.layers = nn.ModuleList(
             [LLaDA2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -318,7 +327,7 @@ class LLaDA2Model(nn.Module):
         device = hidden_states.device
         dtype = hidden_states.dtype
         merge_mask = merge_mask.to(device=device, dtype=torch.bool)
-        if not bool(merge_mask.any().item()):
+        if not torch.cuda.is_current_stream_capturing() and not bool(merge_mask.any().item()):
             return hidden_states
 
         topk_ids = topk_ids.to(device=device, dtype=torch.int64)
@@ -339,8 +348,16 @@ class LLaDA2Model(nn.Module):
         )
 
         if merge_mode == "dmax_topk":
-            mask_id = torch.tensor([int(mask_token_id)], dtype=torch.int64, device=device)
-            mask_embed = self.word_embeddings(mask_id).to(torch.float32)
+            if self.mask_token_id_tensor is not None and self.mask_token_id == int(mask_token_id):
+                mask_embed = self.word_embeddings(self.mask_token_id_tensor).to(torch.float32)
+            else:
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "CUDA graph capture requires LLaDA2Model.mask_token_id_tensor to match "
+                        f"attn_metadata mask token id (model={self.mask_token_id}, metadata={mask_token_id})."
+                    )
+                mask_id = torch.tensor([int(mask_token_id)], dtype=torch.int64, device=device)
+                mask_embed = self.word_embeddings(mask_id).to(torch.float32)
             soft_embeds = topk_weighted + mask_embed * residual_probs
 
             if attn_metadata.token_merge_renormalize:
@@ -356,9 +373,8 @@ class LLaDA2Model(nn.Module):
         else:
             raise ValueError(f"Unsupported token_merge_mode: {merge_mode}")
 
-        output = hidden_states.clone()
-        output[merge_mask] = soft_embeds.to(dtype=dtype)[merge_mask]
-        return output
+        merge_mask_expanded = rearrange(merge_mask, "token -> token 1")
+        return torch.where(merge_mask_expanded, soft_embeds.to(dtype=dtype), hidden_states)
 
 
 def build_llada2_runtime_config(config):
@@ -370,6 +386,7 @@ def build_llada2_runtime_config(config):
         "expert_parallel_size",
         "tensor_parallel_size",
         "data_parallel_size",
+        "mask_token_id",
     ):
         setattr(runtime_config, name, getattr(config, name))
     return runtime_config

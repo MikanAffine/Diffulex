@@ -14,6 +14,12 @@ from diffulex.sampler.llada2 import LLaDA2DMaxSampler, LLaDA2Sampler, LLaDA2dot1
 from diffulex.sampler.sdar import SDARSampler
 from diffulex.sampler.base import SampleOutputBase
 from diffulex.strategy_template.multi_block.engine.model_runner import MultiBlockModelRunnerTemplate
+from diffulex.strategy_template.token_merging_multi_block.attention.metadata import (
+    TokenMergingMultiBlockAttnMetaDataTemplate,
+)
+from diffulex.strategy_template.token_merging_multi_block.engine.model_runner import (
+    TokenMergingMultiBlockModelRunnerTemplate,
+)
 from diffulex.engine.dllm_block import DllmBlock
 from diffulex.config import DecodingThresholds
 
@@ -57,6 +63,37 @@ class _BatchRunner(_MultiBlockRunnerTestBase):
         )
 
 
+class _TokenMergingRunner(TokenMergingMultiBlockModelRunnerTemplate):
+    def __init__(self):
+        self.config = SimpleNamespace(
+            mask_token_id=99,
+            token_merge_top_k=4,
+            token_merge_renormalize=True,
+            token_merge_mode="dmax_topk",
+            token_merge_weight=1.0,
+            buffer_size=1,
+            block_size=4,
+            max_num_reqs=4,
+            max_model_len=16,
+            kv_cache_layout="unified",
+        )
+
+    def prepare_prefill(self, reqs):
+        pass
+
+    def prepare_decode(self, reqs):
+        pass
+
+    def run_model(self, input_ids, positions):
+        pass
+
+    def run(self, reqs):
+        pass
+
+    def capture_cudagraph(self):
+        pass
+
+
 def test_prepare_prefill_req_uses_suffix_positions_and_lengths_for_cached_prefix() -> None:
     req = SimpleNamespace(
         running_sequence=list(range(8, 20)),
@@ -84,6 +121,64 @@ def test_prepare_prefill_req_uses_suffix_positions_and_lengths_for_cached_prefix
     assert prepared["seqlen_k"] == 12
     assert prepared["valid_slice"] == 12
     assert prepared["slot_mapping"] == list(range(8, 20))
+
+
+def test_token_merge_graph_binding_copies_runtime_metadata_into_fixed_buffers() -> None:
+    runner = _TokenMergingRunner()
+    attn_metadata = TokenMergingMultiBlockAttnMetaDataTemplate()
+    attn_metadata.init_token_merging(
+        merge_mask=torch.tensor([False, True, False], dtype=torch.bool),
+        topk_ids=torch.tensor([[99, 99], [7, 8], [99, 99]], dtype=torch.int64),
+        topk_probs=torch.tensor([[0.0, 0.0], [0.6, 0.4], [0.0, 0.0]], dtype=torch.float32),
+        residual_probs=torch.tensor([[0.0], [0.1], [0.0]], dtype=torch.float32),
+        mask_token_id=99,
+        renormalize=True,
+        mode="dmax_topk",
+        weight=1.0,
+    )
+    graph_vars = {
+        "token_merge_mask": torch.zeros(3, dtype=torch.bool),
+        "token_merge_topk_ids": torch.full((3, 4), 99, dtype=torch.int64),
+        "token_merge_topk_probs": torch.zeros((3, 4), dtype=torch.float32),
+        "token_merge_residual_probs": torch.zeros((3, 1), dtype=torch.float32),
+    }
+
+    runner._bind_graph_token_merge_metadata(attn_metadata, graph_vars, num_tokens=3)
+
+    assert torch.equal(attn_metadata.token_merge_mask, torch.tensor([False, True, False], dtype=torch.bool))
+    assert torch.equal(graph_vars["token_merge_mask"], torch.tensor([False, True, False], dtype=torch.bool))
+    assert torch.equal(
+        graph_vars["token_merge_topk_ids"],
+        torch.tensor([[99, 99, 99, 99], [7, 8, 99, 99], [99, 99, 99, 99]], dtype=torch.int64),
+    )
+    assert torch.allclose(
+        graph_vars["token_merge_topk_probs"],
+        torch.tensor([[0.0, 0.0, 0.0, 0.0], [0.6, 0.4, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+    )
+    assert torch.allclose(
+        graph_vars["token_merge_residual_probs"],
+        torch.tensor([[0.0], [0.1], [0.0]], dtype=torch.float32),
+    )
+
+
+def test_token_merge_graph_binding_disables_merge_with_zero_mask_buffers() -> None:
+    runner = _TokenMergingRunner()
+    attn_metadata = TokenMergingMultiBlockAttnMetaDataTemplate()
+    attn_metadata.init_token_merging(mask_token_id=99)
+    graph_vars = {
+        "token_merge_mask": torch.ones(2, dtype=torch.bool),
+        "token_merge_topk_ids": torch.full((2, 4), -1, dtype=torch.int64),
+        "token_merge_topk_probs": torch.full((2, 4), 1.0, dtype=torch.float32),
+        "token_merge_residual_probs": torch.full((2, 1), 1.0, dtype=torch.float32),
+    }
+
+    runner._bind_graph_token_merge_metadata(attn_metadata, graph_vars, num_tokens=2)
+
+    assert not bool(attn_metadata.token_merge_enabled)
+    assert torch.equal(graph_vars["token_merge_mask"], torch.tensor([False, False], dtype=torch.bool))
+    assert torch.equal(graph_vars["token_merge_topk_ids"], torch.full((2, 4), 99, dtype=torch.int64))
+    assert torch.allclose(graph_vars["token_merge_topk_probs"], torch.zeros((2, 4), dtype=torch.float32))
+    assert torch.allclose(graph_vars["token_merge_residual_probs"], torch.zeros((2, 1), dtype=torch.float32))
 
 
 def test_prepare_prefill_req_maps_multiple_blocks_to_one_page() -> None:
