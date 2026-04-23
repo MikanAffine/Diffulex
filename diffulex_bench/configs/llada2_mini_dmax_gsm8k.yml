@@ -19,7 +19,7 @@ engine:
   max_num_batched_tokens: 4096
   max_num_reqs: 1
 
-  enforce_eager: false
+  enforce_eager: true
   enable_prefix_caching: true
   kv_cache_layout: "unified"
   page_size: 32
@@ -38,7 +38,7 @@ engine:
   buffer_size: 1
 
 eval:
-  dataset_name: "gsm8k_diffulex"
+  dataset_name: "gsm8k_diffulex_dmax_chat"
   dataset_split: "test"
   dataset_limit: 100
   temperature: 0.0

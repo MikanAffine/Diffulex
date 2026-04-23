@@ -454,6 +454,8 @@ def test_llada2dmax_sampler_emits_edit_writes_and_token_merge_map() -> None:
         SimpleNamespace(
             sampling_mode="edit",
             token_merge_top_k=1,
+            token_merge_mode="dmax_topk",
+            token_merge_weight=1.0,
         )
     )
     sampler.fetch_attn_metadata = lambda: SimpleNamespace(is_prefill=[True], cu_seqlens_q=None)
@@ -481,21 +483,15 @@ def test_llada2dmax_sampler_emits_edit_writes_and_token_merge_map() -> None:
         in_cache_len=4,
     )
 
-    logits = torch.tensor(
-        [
-            [0.0, 0.4, 0.3],  # low confidence non-mask position -> remask
-            [0.0, 4.0, 0.0],  # confident fill
-            [0.0, 0.0, 3.0],  # confident fill
-        ],
-        dtype=torch.float32,
-    )
+    logits = torch.tensor([[0.0, 0.4, 0.3], [0.0, 4.0, 0.0], [0.0, 0.0, 3.0]], dtype=torch.float32)
     temperatures = torch.tensor([0.0], dtype=torch.float32)
 
     out = sampler([req], logits, temperatures)
 
-    assert out.edit_writes_map["0"]["0"] == {0: 0, 1: 1, 2: 2}
+    assert out.edit_writes_map["0"]["0"] == {0: 1, 1: 1, 2: 2}
     req_merge = out.token_merge_map["0"]
-    assert req_merge[4] is None
+    assert req_merge[4]["topk_ids"] == [1]
+    assert req_merge[4]["residual_prob"] > 0.0
     assert req_merge[5]["topk_ids"] == [1]
     assert req_merge[6]["topk_ids"] == [2]
 
@@ -536,6 +532,8 @@ def test_llada2dmax_sampler_respects_block_editable_start() -> None:
         SimpleNamespace(
             sampling_mode="edit",
             token_merge_top_k=1,
+            token_merge_mode="dmax_topk",
+            token_merge_weight=1.0,
         )
     )
     sampler.fetch_attn_metadata = lambda: SimpleNamespace(is_prefill=[True], cu_seqlens_q=None)
@@ -593,6 +591,218 @@ def test_llada2dmax_sampler_respects_block_editable_start() -> None:
     assert req_merge[5] is None
     assert req_merge[6]["topk_ids"] == [1]
     assert req_merge[7]["topk_ids"] == [2]
+
+
+def test_llada2dmax_sampler_does_not_treat_mask_predictions_as_progress() -> None:
+    sampler = LLaDA2DMaxSampler(
+        SimpleNamespace(
+            sampling_mode="edit",
+            token_merge_top_k=1,
+            token_merge_mode="dmax_topk",
+            token_merge_weight=1.0,
+        )
+    )
+    sampler.fetch_attn_metadata = lambda: SimpleNamespace(is_prefill=[True], cu_seqlens_q=None)
+
+    block = SimpleNamespace(
+        block_id=0,
+        start=0,
+        end=3,
+        block_size=3,
+        is_active=True,
+        num_mask_tokens=2,
+        mask_token_global_ids=[1, 2],
+        mask_token_relative_ids=[1, 2],
+        token_ids=[9, 0, 0],
+        mask_token_id=0,
+        prev_block=SimpleNamespace(is_semi_complete=True),
+        thresholds=SimpleNamespace(accept_threshold=0.9, remask_threshold=0.5),
+        editable_start=1,
+    )
+    req = SimpleNamespace(
+        req_id=0,
+        running_sequence=[9, 0, 0],
+        chunk_size=3,
+        dllm_blocks=[block],
+        contiguous_in_cache_prefix_len=0,
+        in_cache_len=0,
+    )
+
+    logits = torch.tensor(
+        [
+            [0.0, 2.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [0.0, 0.0, 4.0],
+        ],
+        dtype=torch.float32,
+    )
+    temperatures = torch.tensor([0.0], dtype=torch.float32)
+
+    out = sampler([req], logits, temperatures)
+
+    assert out.edit_writes_map["0"]["0"] == {2: 2}
+    req_merge = out.token_merge_map["0"]
+    assert req_merge[0] is None
+    assert req_merge[1] is None
+    assert req_merge[2]["topk_ids"] == [2]
+
+
+def test_llada2dmax_sampler_decodes_leftmost_mask_prefix() -> None:
+    sampler = LLaDA2DMaxSampler(
+        SimpleNamespace(
+            sampling_mode="edit",
+            token_merge_top_k=1,
+            token_merge_mode="dmax_topk",
+            token_merge_weight=1.0,
+        )
+    )
+    sampler.fetch_attn_metadata = lambda: SimpleNamespace(is_prefill=[True], cu_seqlens_q=None)
+
+    block = SimpleNamespace(
+        block_id=0,
+        start=0,
+        end=3,
+        block_size=3,
+        is_active=True,
+        num_mask_tokens=3,
+        mask_token_global_ids=[0, 1, 2],
+        mask_token_relative_ids=[0, 1, 2],
+        token_ids=[0, 0, 0],
+        mask_token_id=0,
+        prev_block=SimpleNamespace(is_semi_complete=True),
+        thresholds=SimpleNamespace(accept_threshold=0.95, remask_threshold=0.4),
+    )
+    req = SimpleNamespace(
+        req_id=0,
+        running_sequence=[0, 0, 0],
+        chunk_size=3,
+        dllm_blocks=[block],
+        contiguous_in_cache_prefix_len=0,
+        in_cache_len=0,
+    )
+
+    logits = torch.tensor(
+        [
+            [0.0, 5.0, 0.0],
+            [0.0, 5.0, 0.0],
+            [0.0, 0.1, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    out = sampler([req], logits, torch.tensor([0.0], dtype=torch.float32))
+
+    assert out.edit_writes_map["0"]["0"] == {0: 1, 1: 1}
+    req_merge = out.token_merge_map["0"]
+    assert req_merge[0]["topk_ids"] == [1]
+    assert req_merge[1]["topk_ids"] == [1]
+    assert req_merge[2] is None
+
+
+def test_llada2dmax_sampler_refreshes_editable_non_mask_tokens() -> None:
+    sampler = LLaDA2DMaxSampler(
+        SimpleNamespace(
+            sampling_mode="edit",
+            token_merge_top_k=1,
+            token_merge_mode="dmax_topk",
+            token_merge_weight=1.0,
+        )
+    )
+    sampler.fetch_attn_metadata = lambda: SimpleNamespace(is_prefill=[True], cu_seqlens_q=None)
+
+    block = SimpleNamespace(
+        block_id=0,
+        start=10,
+        end=14,
+        block_size=4,
+        is_active=True,
+        num_mask_tokens=2,
+        mask_token_global_ids=[12, 13],
+        mask_token_relative_ids=[2, 3],
+        token_ids=[7, 8, 0, 0],
+        mask_token_id=0,
+        prev_block=SimpleNamespace(is_semi_complete=True),
+        thresholds=SimpleNamespace(accept_threshold=0.8, remask_threshold=0.4),
+        editable_start=0,
+    )
+    req = SimpleNamespace(
+        req_id=0,
+        running_sequence=[7, 8, 0, 0],
+        chunk_size=4,
+        dllm_blocks=[block],
+        contiguous_in_cache_prefix_len=10,
+        in_cache_len=10,
+    )
+
+    logits = torch.tensor(
+        [
+            [0.0, 0.0, 5.0],
+            [0.0, 4.0, 0.0],
+            [0.0, 3.0, 0.0],
+            [0.0, 0.1, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    out = sampler([req], logits, torch.tensor([0.0], dtype=torch.float32))
+
+    assert out.edit_writes_map["0"]["0"] == {0: 2, 1: 1, 2: 1}
+    req_merge = out.token_merge_map["0"]
+    assert req_merge[10]["topk_ids"] == [2]
+    assert req_merge[11]["topk_ids"] == [1]
+    assert req_merge[12]["topk_ids"] == [1]
+    assert req_merge[13] is None
+
+
+def test_llada2dmax_sampler_emits_confidence_mask_blend_descriptors_on_dmax_path() -> None:
+    sampler = LLaDA2DMaxSampler(
+        SimpleNamespace(
+            sampling_mode="edit",
+            token_merge_top_k=1,
+            token_merge_mode="dmax_topk",
+            token_merge_weight=1.0,
+        )
+    )
+    sampler.fetch_attn_metadata = lambda: SimpleNamespace(is_prefill=[True], cu_seqlens_q=None)
+
+    block = SimpleNamespace(
+        block_id=0,
+        start=0,
+        end=2,
+        block_size=2,
+        is_active=True,
+        num_mask_tokens=1,
+        mask_token_global_ids=[1],
+        mask_token_relative_ids=[1],
+        token_ids=[9, 0],
+        mask_token_id=0,
+        prev_block=SimpleNamespace(is_semi_complete=True),
+        thresholds=SimpleNamespace(accept_threshold=0.5, remask_threshold=0.4),
+    )
+    req = SimpleNamespace(
+        req_id=0,
+        running_sequence=[9, 0],
+        chunk_size=2,
+        dllm_blocks=[block],
+        contiguous_in_cache_prefix_len=0,
+        in_cache_len=0,
+    )
+
+    logits = torch.tensor(
+        [
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 4.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    out = sampler([req], logits, torch.tensor([0.0], dtype=torch.float32))
+
+    assert out.edit_writes_map["0"]["0"] == {0: 1, 1: 2}
+    assert out.token_merge_map["0"][0]["topk_ids"] == [1]
+    assert out.token_merge_map["0"][0]["residual_prob"] > 0.0
+    assert out.token_merge_map["0"][1]["topk_ids"] == [2]
+    assert out.token_merge_map["0"][1]["residual_prob"] > 0.0
 
 
 def test_llada_sampler_does_not_resample_mask_token() -> None:

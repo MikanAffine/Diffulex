@@ -1,5 +1,8 @@
+import os
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from einops import rearrange
 
@@ -9,6 +12,10 @@ from diffulex_kernel import (
     chunked_prefill_attn_unified,
 )
 from diffulex.attention.metadata import AttnMetaDataBase
+
+
+def _use_reference_torch_attention() -> bool:
+    return os.getenv("DIFFULEX_REFERENCE_TORCH_ATTENTION", "0") == "1"
 
 
 class Attention(nn.Module):
@@ -46,14 +53,52 @@ class Attention(nn.Module):
         v: torch.Tensor,
         mask: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        # Reshape
-        q = rearrange(q, "s (nh hd) -> s nh hd", **self.q_shape)
-        k = rearrange(k, "s (nkvh hd) -> s nkvh hd", **self.kv_shape)
+        if q.dim() == 2:
+            q = rearrange(q, "s (nh hd) -> s nh hd", **self.q_shape).contiguous()
+        elif q.dim() == 3:
+            q = q.contiguous()
+        else:
+            raise ValueError(f"Unsupported q ndim for Attention: {q.dim()}")
+
+        if k.dim() == 2:
+            k = rearrange(k, "s (nkvh hd) -> s nkvh hd", **self.kv_shape).contiguous()
+        elif k.dim() == 3:
+            k = k.contiguous()
+        else:
+            raise ValueError(f"Unsupported k ndim for Attention: {k.dim()}")
+
         # Some callers pass V as a strided view from packed QKV. The Triton
         # chunked prefill kernel requires contiguous V rows for this layout.
-        v = rearrange(v, "s (nkvh hd) -> s nkvh hd", **self.kv_shape).contiguous()
+        if v.dim() == 2:
+            v = rearrange(v, "s (nkvh hd) -> s nkvh hd", **self.kv_shape).contiguous()
+        elif v.dim() == 3:
+            v = v.contiguous()
+        else:
+            raise ValueError(f"Unsupported v ndim for Attention: {v.dim()}")
         if q.shape[0] == 0:
             return rearrange(q, "s nh hd -> s (nh hd)").contiguous()
+
+        if _use_reference_torch_attention():
+            # Reference fallback for debugging: full-window torch attention
+            # without KV-cache kernels. This is intentionally slower but keeps
+            # the numerics closer to the naive implementation.
+            q_ref = q.transpose(0, 1).contiguous()  # [nh, s, hd]
+            k_ref = k.transpose(0, 1).contiguous()  # [nkvh, s, hd]
+            v_ref = v.transpose(0, 1).contiguous()  # [nkvh, s, hd]
+            if self.num_kv_heads != self.num_heads:
+                repeat_factor = self.num_heads // self.num_kv_heads
+                k_ref = k_ref.repeat_interleave(repeat_factor, dim=0)
+                v_ref = v_ref.repeat_interleave(repeat_factor, dim=0)
+            scores = torch.matmul(
+                q_ref.to(torch.float32),
+                k_ref.transpose(-1, -2).to(torch.float32),
+            ) * self.scale
+            if mask is not None:
+                scores = scores + mask.to(scores.dtype)
+            probs = F.softmax(scores, dim=-1, dtype=torch.float32).to(q_ref.dtype)
+            o = torch.matmul(probs, v_ref.to(probs.dtype))
+            o = o.transpose(0, 1).contiguous()
+            return rearrange(o, "s nh hd -> s (nh hd)").contiguous()
 
         attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
         k_cache, v_cache = self.k_cache, self.v_cache

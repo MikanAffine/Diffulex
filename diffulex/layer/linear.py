@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import importlib
+from functools import lru_cache
 
 import torch
 import torch.nn as nn
@@ -7,6 +10,68 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from diffulex.distributed.parallel_state import fetch_parallel_state
+
+
+TP_FP32_ALLREDUCE = os.environ.get("DIFFULEX_TP_FP32_ALLREDUCE", "0") == "1"
+TP_FP32_ALLREDUCE_LINEAR = TP_FP32_ALLREDUCE or os.environ.get("DIFFULEX_TP_FP32_ALLREDUCE_LINEAR", "0") == "1"
+TP_FP32_ALLREDUCE_ATTN_DENSE = os.environ.get("DIFFULEX_TP_FP32_ALLREDUCE_ATTN_DENSE", "0") == "1"
+TP_FP32_ALLREDUCE_MLP_DOWN = os.environ.get("DIFFULEX_TP_FP32_ALLREDUCE_MLP_DOWN", "0") == "1"
+TP_FP32_ALLREDUCE_SHARED_DOWN = os.environ.get("DIFFULEX_TP_FP32_ALLREDUCE_SHARED_DOWN", "0") == "1"
+TP_ALLREDUCE_IMPL = os.environ.get("DIFFULEX_TP_ALLREDUCE_IMPL", "torch").strip().lower()
+TP_ALLREDUCE_EXTERNAL = os.environ.get("DIFFULEX_TP_ALLREDUCE_EXTERNAL", "").strip()
+
+
+@lru_cache(maxsize=1)
+def _load_external_allreduce():
+    """Load external all-reduce function from 'module.submodule:function'."""
+    if not TP_ALLREDUCE_EXTERNAL:
+        return None
+    if ":" not in TP_ALLREDUCE_EXTERNAL:
+        return None
+    module_name, func_name = TP_ALLREDUCE_EXTERNAL.split(":", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, func_name, None)
+
+
+def tp_all_reduce(x: torch.Tensor, group, *, fp32: bool = False) -> torch.Tensor:
+    ext = _load_external_allreduce()
+    if ext is not None:
+        return ext(x)
+    if TP_ALLREDUCE_IMPL == "all_reduce_into_tensor":
+        if not hasattr(dist, "all_reduce_into_tensor"):
+            if not fp32:
+                dist.all_reduce(x, group=group)
+                return x
+            x_fp32 = x.to(torch.float32)
+            dist.all_reduce(x_fp32, group=group)
+            return x_fp32.to(x.dtype)
+        if not fp32:
+            out = torch.empty_like(x)
+            dist.all_reduce_into_tensor(out, x, group=group)
+            return out
+        x_fp32 = x.to(torch.float32)
+        out_fp32 = torch.empty_like(x_fp32)
+        dist.all_reduce_into_tensor(out_fp32, x_fp32, group=group)
+        return out_fp32.to(x.dtype)
+    if not fp32:
+        dist.all_reduce(x, group=group)
+        return x
+    x_fp32 = x.to(torch.float32)
+    dist.all_reduce(x_fp32, group=group)
+    return x_fp32.to(x.dtype)
+
+
+def row_parallel_use_fp32(module: nn.Module) -> bool:
+    if TP_FP32_ALLREDUCE_LINEAR:
+        return True
+    kind = getattr(module, "tp_all_reduce_kind", None)
+    if kind == "attn_dense":
+        return TP_FP32_ALLREDUCE_ATTN_DENSE
+    if kind == "mlp_down_proj":
+        return TP_FP32_ALLREDUCE_MLP_DOWN
+    if kind == "shared_expert_down_proj":
+        return TP_FP32_ALLREDUCE_SHARED_DOWN
+    return False
 
 
 def divide(numerator, denominator):
@@ -266,14 +331,15 @@ class RowParallelLinear(LinearBase, LoRAMixin):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if self.tp_rank == 0 else None
         tp_group = self.tp_group
+        use_fp32_all_reduce = row_parallel_use_fp32(self)
         y = self._forward_base(x, bias)
         if hasattr(self, "r") and self.r > 0 and not self.merged:
             lora_out = F.linear(self.lora_dropout(x), self.lora_A)
             lora_out = F.linear(lora_out, self.lora_B)
             if self.tp_size > 1:
-                dist.all_reduce(y, group=tp_group)
-                dist.all_reduce(lora_out, group=tp_group)
+                y = tp_all_reduce(y, tp_group, fp32=use_fp32_all_reduce)
+                lora_out = tp_all_reduce(lora_out, tp_group, fp32=use_fp32_all_reduce)
             return y + lora_out * self.scaling
         if self.tp_size > 1:
-            dist.all_reduce(y, group=tp_group)
+            y = tp_all_reduce(y, tp_group, fp32=use_fp32_all_reduce)
         return y

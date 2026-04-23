@@ -35,6 +35,21 @@ class TokenMergeSamplerMixin:
             "residual_prob": residual_prob,
         }
 
+    def _build_manual_token_merge_descriptor(
+        self,
+        token: int,
+        confidence: float,
+        mask_id: int,
+    ) -> dict | None:
+        if token == mask_id:
+            return None
+        confidence = float(max(0.0, min(1.0, confidence)))
+        return {
+            "topk_ids": [int(token)],
+            "topk_probs": [confidence],
+            "residual_prob": max(0.0, 1.0 - confidence),
+        }
+
     def _postprocess_sample_output(
         self,
         reqs,

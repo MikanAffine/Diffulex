@@ -224,6 +224,9 @@ class ModelRunnerBase(
 
     def warmup_model(self):
         # TODO: attention metadata needs optimize for strategy awareness in warm-up
+        if os.getenv("DIFFULEX_SKIP_WARMUP", "0") == "1":
+            logger.warning("Skipping model warmup because DIFFULEX_SKIP_WARMUP=1.")
+            return
         logger.info("Warming up model...")
         set_warming_up(True)
         torch.cuda.empty_cache()

@@ -3,8 +3,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+import os
 
 from diffulex.distributed.parallel_state import fetch_parallel_state
+
+
+LM_HEAD_FP32 = os.environ.get("DIFFULEX_LM_HEAD_FP32", "0") == "1"
+LM_HEAD_FP32_GATHER = LM_HEAD_FP32 or os.environ.get("DIFFULEX_LM_HEAD_FP32_GATHER", "0") == "1"
 
 
 class VocabParallelEmbedding(nn.Module):
@@ -60,9 +65,22 @@ class ParallelLMHead(VocabParallelEmbedding):
             self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor):
-        logits = F.linear(x, self.weight, self.bias)
+        if LM_HEAD_FP32:
+            logits = F.linear(
+                x.to(torch.float32),
+                self.weight.to(torch.float32),
+                self.bias.to(torch.float32) if self.bias is not None else None,
+            ).to(x.dtype)
+        else:
+            logits = F.linear(x, self.weight, self.bias)
         if self.tp_size > 1:
-            gathered_logits = [torch.empty_like(logits) for _ in range(self.tp_size)]
-            dist.all_gather(gathered_logits, logits, group=self.tp_group)
-            logits = torch.cat(gathered_logits, -1) if self.tp_rank == 0 else None
+            if LM_HEAD_FP32_GATHER:
+                gather_input = logits.to(torch.float32)
+                gathered_logits = [torch.empty_like(gather_input) for _ in range(self.tp_size)]
+                dist.all_gather(gathered_logits, gather_input, group=self.tp_group)
+                logits = torch.cat(gathered_logits, -1).to(logits.dtype) if self.tp_rank == 0 else None
+            else:
+                gathered_logits = [torch.empty_like(logits) for _ in range(self.tp_size)]
+                dist.all_gather(gathered_logits, logits, group=self.tp_group)
+                logits = torch.cat(gathered_logits, -1) if self.tp_rank == 0 else None
         return logits

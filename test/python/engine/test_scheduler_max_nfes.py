@@ -1,4 +1,5 @@
 from collections import deque
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -166,3 +167,159 @@ def test_scheduler_postprocess_raises_when_req_id_map_is_missing() -> None:
 
     with pytest.raises(KeyError, match="13"):
         scheduler.postprocess_multi_block([req], sample_output)
+
+
+def test_scheduler_postprocess_writes_block_trace_jsonl(tmp_path, monkeypatch) -> None:
+    scheduler = _Scheduler()
+    req = _Req(req_id=17)
+    req.token_ids = [9, 0, 0, 8]
+
+    class _Block:
+        def __init__(self, req, block_id, start, end, editable_start=0, status="ACTIVE"):
+            self.req = req
+            self.block_id = block_id
+            self.start = start
+            self.end = end
+            self.editable_start = editable_start
+            self.status = SimpleNamespace(name=status)
+            self.mask_token_id = 0
+
+        @property
+        def token_ids(self):
+            return self.req.token_ids[self.start : self.end]
+
+        @property
+        def num_mask_tokens(self):
+            return sum(token_id == self.mask_token_id for token_id in self.token_ids)
+
+        def write_token(self, token_id, rel_idx):
+            self.req.token_ids[self.start + rel_idx] = token_id
+
+    req.dllm_blocks = [_Block(req, 0, 0, 2), _Block(req, 1, 2, 4, editable_start=1)]
+
+    trace_path = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("DIFFULEX_BLOCK_TRACE_PATH", str(trace_path))
+    monkeypatch.setenv("DIFFULEX_BLOCK_TRACE_MAX_NFE", "4")
+    monkeypatch.setenv("DIFFULEX_BLOCK_TRACE_MAX_BLOCKS", "2")
+
+    sample_output = SimpleNamespace(
+        true_local_ids_map={"17": {}},
+        accepted_ids_map={"17": {}},
+        sampled_tokens_map={"17": {}},
+        edit_writes_map={"17": {"0": {1: 5}}},
+    )
+
+    scheduler.postprocess_multi_block([req], sample_output)
+
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["req_id"] == 17
+    assert record["step_nfe"] == 1
+    assert record["new_tokens"] == 1
+    assert record["trace_start_block_id"] == 1
+    assert record["blocks"][0]["block_id"] == 1
+    assert record["blocks"][0]["writes"] == {}
+    assert record["blocks"][0]["token_ids"] == [0, 8]
+    assert record["blocks"][0]["accepted_ids"] == []
+
+
+def test_scheduler_postprocess_updates_block_commit_flags_from_sample_output() -> None:
+    scheduler = _Scheduler()
+    req = _Req(req_id=19)
+
+    class _Block:
+        def __init__(self):
+            self.block_id = 0
+            self.start = 0
+            self.end = 2
+            self.editable_start = 0
+            self.status = SimpleNamespace(name="ACTIVE")
+            self.mask_token_id = 0
+            self.commit_ready = False
+            self.same_as_previous = False
+            self.all_confident = False
+
+        @property
+        def is_active(self):
+            return True
+
+        @property
+        def num_mask_tokens(self):
+            return 0
+
+        @property
+        def token_ids(self):
+            return [1, 2]
+
+        def write_token(self, token_id, rel_idx):
+            raise AssertionError("write_token should not be called in this test")
+
+    block = _Block()
+    req.dllm_blocks = [block]
+    sample_output = SimpleNamespace(
+        true_local_ids_map={"19": {}},
+        accepted_ids_map={"19": {}},
+        sampled_tokens_map={"19": {}},
+        edit_writes_map={"19": {}},
+        block_state_map={"19": {"0": {"committable": True, "same_as_previous": False, "all_confident": True}}},
+    )
+
+    scheduler.postprocess_multi_block([req], sample_output)
+
+    assert block.commit_ready is True
+    assert block.same_as_previous is False
+    assert block.all_confident is True
+
+
+def test_multiblock_req_postprocess_requires_commit_ready_before_to_cache() -> None:
+    class _Block:
+        def __init__(self, commit_ready: bool):
+            self.prev_block = None
+            self.commit_ready = commit_ready
+            self._is_to_cache = False
+
+        @property
+        def is_active(self):
+            return not self._is_to_cache
+
+        @property
+        def is_complete(self):
+            return True
+
+        @property
+        def is_to_cache(self):
+            return self._is_to_cache
+
+        @property
+        def is_dummy(self):
+            return False
+
+        @property
+        def is_in_cache(self):
+            return False
+
+        def to_cache(self):
+            self._is_to_cache = True
+
+    def _build_req(commit_ready: bool):
+        block = _Block(commit_ready=commit_ready)
+        req = SimpleNamespace(
+            maybe_postprocess_prefix_blocks=lambda: None,
+            dllm_block_buffer=SimpleNamespace(buffer_size=1, dllm_blocks=[block]),
+            push_back_dummy_block=lambda: None,
+            eos_token_generated=False,
+            max_new_tokens_reached=False,
+            max_model_len_reached=False,
+            max_nfe_reached=False,
+            max_repetition_run_reached=False,
+        )
+        return req, block
+
+    req, block = _build_req(commit_ready=False)
+    MultiBlockReqTemplate.postprocess(req)
+    assert block.is_to_cache is False
+
+    req, block = _build_req(commit_ready=True)
+    MultiBlockReqTemplate.postprocess(req)
+    assert block.is_to_cache is True

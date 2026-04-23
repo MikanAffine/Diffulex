@@ -8,6 +8,7 @@ expert-major pack/sort step before launching Triton kernels.
 """
 
 from math import prod
+import os
 
 import torch
 import torch.nn.functional as F
@@ -18,7 +19,25 @@ import triton.language as tl
 from diffulex.moe.metadata import ExpertExecutionMetadata
 
 
-PACKED_BLOCK_M = 16
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+PACKED_BLOCK_M = _env_int("DIFFULEX_MOE_GEMM_BLOCK_M", 16)
+PACKED_BLOCK_N = _env_int("DIFFULEX_MOE_GEMM_BLOCK_N", 64)
+PACKED_BLOCK_K = _env_int("DIFFULEX_MOE_GEMM_BLOCK_K", 32)
+PACKED_BLOCK_K_W13 = _env_int("DIFFULEX_MOE_GEMM_BLOCK_K_W13", PACKED_BLOCK_K)
+PACKED_BLOCK_K_W2 = _env_int("DIFFULEX_MOE_GEMM_BLOCK_K_W2", PACKED_BLOCK_K)
+PACKED_NUM_WARPS = _env_int("DIFFULEX_MOE_GEMM_NUM_WARPS", 4)
+
+ALIGN_COUNT_BLOCK_M = _env_int("DIFFULEX_MOE_ALIGN_COUNT_BLOCK_M", 256)
+ALIGN_COUNT_NUM_WARPS = _env_int("DIFFULEX_MOE_ALIGN_COUNT_NUM_WARPS", 8)
+ALIGN_BLOCK_E = _env_int("DIFFULEX_MOE_ALIGN_BLOCK_E", 16)
+ALIGN_FILL_NUM_WARPS = _env_int("DIFFULEX_MOE_ALIGN_FILL_NUM_WARPS", 1)
+
 WORKSPACE_CACHE: dict[tuple[str, int, torch.dtype], torch.Tensor] = {}
 
 
@@ -521,14 +540,14 @@ def _build_aligned_block_metadata_triton(
         zero=True,
     )
     _count_slots_per_expert[
-        (triton.cdiv(num_slots, 256),)
+        (triton.cdiv(num_slots, ALIGN_COUNT_BLOCK_M),)
     ](
         packed_local_expert_ids,
         counts,
         num_slots,
         num_local_experts,
-        BLOCK_M=256,
-        num_warps=8,
+        BLOCK_M=ALIGN_COUNT_BLOCK_M,
+        num_warps=ALIGN_COUNT_NUM_WARPS,
     )
 
     offsets = _get_workspace_tensor(
@@ -573,7 +592,7 @@ def _build_aligned_block_metadata_triton(
         fill_value=-1,
     )
     _scatter_slots_by_expert[
-        (triton.cdiv(num_slots, 256),)
+        (triton.cdiv(num_slots, ALIGN_COUNT_BLOCK_M),)
     ](
         packed_local_expert_ids,
         offsets,
@@ -581,11 +600,11 @@ def _build_aligned_block_metadata_triton(
         sorted_slot_ids,
         num_slots,
         num_local_experts,
-        BLOCK_M=256,
-        num_warps=8,
+        BLOCK_M=ALIGN_COUNT_BLOCK_M,
+        num_warps=ALIGN_COUNT_NUM_WARPS,
     )
     _fill_expert_block_ids[
-        (triton.cdiv(num_local_experts, 16),)
+        (triton.cdiv(num_local_experts, ALIGN_BLOCK_E),)
     ](
         offsets,
         padded_counts,
@@ -593,8 +612,8 @@ def _build_aligned_block_metadata_triton(
         num_local_experts,
         block_size,
         max_blocks_per_expert,
-        BLOCK_E=16,
-        num_warps=1,
+        BLOCK_E=ALIGN_BLOCK_E,
+        num_warps=ALIGN_FILL_NUM_WARPS,
     )
     return sorted_slot_ids, expert_block_ids, max_num_tokens_padded
 
@@ -606,6 +625,7 @@ def _launch_grouped_expert_gemm_gathered(
     *,
     num_cols: int,
     k_dim: int,
+    block_k_override: int | None = None,
 ) -> torch.Tensor:
     packed_out = _get_workspace_tensor(
         "gate_up",
@@ -617,8 +637,9 @@ def _launch_grouped_expert_gemm_gathered(
         return packed_out
 
     block_m = PACKED_BLOCK_M
-    block_n = 64 if num_cols >= 64 else triton.next_power_of_2(num_cols)
-    block_k = 32 if k_dim >= 32 else triton.next_power_of_2(k_dim)
+    block_n = min(PACKED_BLOCK_N, triton.next_power_of_2(num_cols))
+    base_block_k = PACKED_BLOCK_K if block_k_override is None else int(block_k_override)
+    block_k = min(base_block_k, triton.next_power_of_2(k_dim))
     _grouped_expert_gemm_gathered[
         (triton.cdiv(packed_inputs.num_slots, block_m), triton.cdiv(num_cols, block_n))
     ](
@@ -642,7 +663,7 @@ def _launch_grouped_expert_gemm_gathered(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
-        num_warps=4,
+        num_warps=PACKED_NUM_WARPS,
     )
     return packed_out
 
@@ -655,6 +676,7 @@ def _launch_grouped_expert_gemm_packed(
     num_cols: int,
     k_dim: int,
     workspace_name: str = "packed_slot_outputs",
+    block_k_override: int | None = None,
 ) -> torch.Tensor:
     packed_out = _get_workspace_tensor(
         workspace_name,
@@ -666,8 +688,9 @@ def _launch_grouped_expert_gemm_packed(
         return packed_out
 
     block_m = PACKED_BLOCK_M
-    block_n = 64 if num_cols >= 64 else triton.next_power_of_2(num_cols)
-    block_k = 32 if k_dim >= 32 else triton.next_power_of_2(k_dim)
+    block_n = min(PACKED_BLOCK_N, triton.next_power_of_2(num_cols))
+    base_block_k = PACKED_BLOCK_K if block_k_override is None else int(block_k_override)
+    block_k = min(base_block_k, triton.next_power_of_2(k_dim))
     if (
         packed_inputs.sorted_slot_ids is not None
         and packed_inputs.expert_block_ids is not None
@@ -698,7 +721,7 @@ def _launch_grouped_expert_gemm_packed(
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             BLOCK_K=block_k,
-            num_warps=4,
+            num_warps=PACKED_NUM_WARPS,
         )
         return packed_out
 
@@ -723,7 +746,7 @@ def _launch_grouped_expert_gemm_packed(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
-        num_warps=4,
+        num_warps=PACKED_NUM_WARPS,
     )
     return packed_out
 
@@ -814,6 +837,7 @@ def _launch_fused_moe_kernels(
         packed_inputs,
         num_cols=intermediate_twice,
         k_dim=hidden_size,
+        block_k_override=PACKED_BLOCK_K_W13,
     )
 
     gate = gate_up[:, :intermediate_size]
@@ -826,6 +850,7 @@ def _launch_fused_moe_kernels(
         packed_inputs,
         num_cols=w2.shape[1],
         k_dim=intermediate_size,
+        block_k_override=PACKED_BLOCK_K_W2,
     )
     return _combine_packed_moe_outputs(
         packed_slot_outputs,
@@ -907,6 +932,7 @@ def fused_expert_packed(
         num_cols=intermediate_twice,
         k_dim=hidden_size,
         workspace_name="packed_gate_up",
+        block_k_override=PACKED_BLOCK_K_W13,
     )
     gate = gate_up[:, :intermediate_size]
     up = gate_up[:, intermediate_size:]
@@ -919,4 +945,5 @@ def fused_expert_packed(
         num_cols=w2.shape[1],
         k_dim=intermediate_size,
         workspace_name="packed_slot_outputs",
+        block_k_override=PACKED_BLOCK_K_W2,
     ).to(hidden_states.dtype)

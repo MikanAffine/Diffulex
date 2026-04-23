@@ -472,7 +472,7 @@ class MultiBlockReqTemplate(DllmReq):
         while block_id < self.dllm_block_buffer.buffer_size:
             block = self.dllm_block_buffer.dllm_blocks[block_id]
             prev_ready = block.prev_block is None or block.prev_block.is_to_cache or block.prev_block.is_in_cache
-            if block.is_active and block.is_complete and prev_ready:
+            if block.is_active and block.is_complete and bool(getattr(block, "commit_ready", False)) and prev_ready:
                 block.to_cache()
                 block_id += 1
             elif block.is_to_cache:

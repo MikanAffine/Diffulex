@@ -1,10 +1,15 @@
+import os
+
 from diffulex.config import Config
 from diffulex.engine.request import AutoReq
+from diffulex.engine.status import DllmReqStatus
 from diffulex.sampling_params import SamplingParams
 from diffulex.attention.metadata import is_warming_up
 from diffulex.strategy_template.token_merging_multi_block.engine.request import (
     TokenMergingMultiBlockReqTemplate,
 )
+
+DMAX_FORCE_PREFILL_ACTIVE = os.environ.get("DIFFULEX_DMAX_FORCE_PREFILL_ACTIVE", "0") == "1"
 
 
 @AutoReq.register("dmax")
@@ -23,3 +28,15 @@ class DMaxReq(TokenMergingMultiBlockReqTemplate):
         if is_warming_up():
             # Used for warming up token merging
             self.init_token_merging_multi_block(config)
+
+    def lazy_activate(self):
+        if not DMAX_FORCE_PREFILL_ACTIVE:
+            return super().lazy_activate()
+
+        self.log_status()
+        self.status = self.status_history[-1]
+        if self.is_pending or self.is_decoding or self.is_prefilling:
+            # Keep active-block iterations on the prefix-cache prefill path.
+            # This matches reference generate_spd more closely than switching
+            # to the 32-token decode path after the first NFE.
+            self.status = DllmReqStatus.PREFILLING

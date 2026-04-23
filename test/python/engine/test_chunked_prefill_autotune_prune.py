@@ -10,14 +10,24 @@ def _config(block_n: int) -> triton.Config:
 def test_prune_chunked_prefill_configs_keeps_stable_block_n_for_small_blocks() -> None:
     configs = [_config(64), _config(128)]
 
-    pruned = _prune_chunked_prefill_configs(configs, {}, DLLM_BLOCK_SIZE=16)
+    pruned = _prune_chunked_prefill_configs(configs, {}, DLLM_BLOCK_SIZE=16, IS_BLOCK_CAUSAL=True)
 
     assert [config.kwargs["BLOCK_N"] for config in pruned] == [64]
 
 
-def test_prune_chunked_prefill_configs_keeps_search_space_for_large_blocks() -> None:
+def test_prune_chunked_prefill_configs_keeps_stable_block_n_for_block_size_32_causal() -> None:
     configs = [_config(64), _config(128)]
 
-    pruned = _prune_chunked_prefill_configs(configs, {}, DLLM_BLOCK_SIZE=32)
+    pruned = _prune_chunked_prefill_configs(configs, {}, DLLM_BLOCK_SIZE=32, IS_BLOCK_CAUSAL=True)
 
-    assert [config.kwargs["BLOCK_N"] for config in pruned] == [64, 128]
+    assert [config.kwargs["BLOCK_N"] for config in pruned] == [64]
+
+
+def test_prune_chunked_prefill_configs_keeps_search_space_for_non_causal_or_large_blocks() -> None:
+    configs = [_config(64), _config(128)]
+
+    pruned_non_causal = _prune_chunked_prefill_configs(configs, {}, DLLM_BLOCK_SIZE=32, IS_BLOCK_CAUSAL=False)
+    pruned_large = _prune_chunked_prefill_configs(configs, {}, DLLM_BLOCK_SIZE=64, IS_BLOCK_CAUSAL=True)
+
+    assert [config.kwargs["BLOCK_N"] for config in pruned_non_causal] == [64, 128]
+    assert [config.kwargs["BLOCK_N"] for config in pruned_large] == [64, 128]

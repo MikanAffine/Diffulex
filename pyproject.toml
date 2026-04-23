@@ -41,6 +41,10 @@ dependencies = [
     "lm-eval"
 ]
 
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project.urls]
 Homepage = "https://sjtu-deng-lab.github.io/Diffulex"
 Repository = "https://github.com/SJTU-DENG-Lab/Diffulex"
@@ -58,9 +62,13 @@ markers = [
 ]
 
 [tool.setuptools.packages.find]
-include = [
+where = [
     "diffulex",
     "diffulex_bench",
     "diffulex_kernel",
-    "test"
+]
+include = [
+    "diffulex*",
+    "diffulex_bench*",
+    "diffulex_kernel*"
 ]

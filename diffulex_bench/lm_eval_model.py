@@ -329,9 +329,10 @@ class DiffulexLM(LM):
                 until_raw = getattr(gen_kw, "until", None)
             until = _normalize_until_terms(until_raw)
 
-            trunc = output.get("text", "") or ""
-            full = output.get("full_text") or trunc
-            extracted = _strip_at_until_terms(trunc, until)
+            raw_trunc = output.get("text", "") or ""
+            trunc = _strip_at_until_terms(raw_trunc, until)
+            full = output.get("full_text") or raw_trunc
+            extracted = trunc
 
             self._responses_full.append(full)
             self._responses_truncated.append(trunc)

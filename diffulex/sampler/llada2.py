@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import torch
 import torch.nn.functional as F
 
@@ -45,6 +46,14 @@ class LLaDA2dot1Sampler(EditSamplerMixin, LLaDA2Sampler):
 class LLaDA2DMaxSampler(TokenMergeSamplerMixin, LLaDA2dot1Sampler):
     def __init__(self, config=None):
         super().__init__(config=config)
+        self._token_merge_mode = str(getattr(config, "token_merge_mode", "dmax_topk"))
+        self._enable_token_merge = bool(
+            self._token_merge_mode in {"dmax_topk", "iter_smooth_topk"}
+            and float(getattr(config, "token_merge_weight", 1.0)) > 0.0
+        )
+        self._last_block_state_map: dict[str, dict[str, dict]] = {}
+        self._last_dmax_trace_map: dict[str, dict[str, dict]] = {}
+        self._fast_prob_path = os.getenv("DIFFULEX_DMAX_SAMPLER_FAST", "0") == "1"
         del config
 
     def _compute_accepted_ids(
@@ -64,20 +73,6 @@ class LLaDA2DMaxSampler(TokenMergeSamplerMixin, LLaDA2dot1Sampler):
             gumbel = -torch.log(-torch.log(torch.rand_like(logits, dtype=torch.float32).clamp_(1e-6, 1 - 1e-6)))
             logits = logits.to(torch.float32) + gumbel * temperature
         return torch.argmax(logits, dim=-1)
-
-    @staticmethod
-    def _segment_max_transfer(mask_new: torch.Tensor, confidence: torch.Tensor) -> torch.Tensor:
-        transfer_index = torch.zeros_like(mask_new, dtype=torch.bool)
-        starts = None
-        for idx, is_mask in enumerate(mask_new.tolist()):
-            if is_mask and starts is None:
-                starts = idx
-            elif not is_mask and starts is not None:
-                transfer_index[starts + int(torch.argmax(confidence[starts:idx]).item())] = True
-                starts = None
-        if starts is not None:
-            transfer_index[starts + int(torch.argmax(confidence[starts:]).item())] = True
-        return transfer_index
 
     def _extract_block_logits(self, req, req_logits: torch.Tensor, block, is_prefill: bool) -> torch.Tensor | None:
         if req_logits.shape[0] == 0:
@@ -103,60 +98,150 @@ class LLaDA2DMaxSampler(TokenMergeSamplerMixin, LLaDA2dot1Sampler):
         block_tokens: torch.Tensor,
         block_logits: torch.Tensor,
         temperature: float,
-    ) -> tuple[dict[int, int], dict[int, dict | None]]:
+    ) -> tuple[dict[int, int], dict[int, dict | None], dict, dict]:
         editable_start = int(getattr(block, "editable_start", 0) or 0)
         if editable_start >= int(block.block_size):
-            return {}, {}
+            empty_trace = {
+                "editable_start": int(editable_start),
+                "block_before": [],
+                "block_after": [],
+                "editable_tokens_before": [],
+                "editable_tokens_after": [],
+                "mask_positions": [],
+                "decode_positions": [],
+                "below_threshold_positions": [],
+                "token_index": [],
+                "top1_tokens": [],
+                "top1_confidence": [],
+                "topk_ids": [],
+                "topk_probs": [],
+                "writes": {},
+            }
+            return {}, {}, {"committable": True, "same_as_previous": True, "all_confident": True}, empty_trace
 
         mask_id = int(block.mask_token_id)
         accept_threshold = float(block.thresholds.accept_threshold)
-        remask_threshold = float(block.thresholds.remask_threshold)
-        block_tokens = block_tokens[editable_start:]
-        block_logits = block_logits[editable_start:, ...]
-        mask_index = block_tokens.eq(mask_id)
-        x0 = self._sample_argmax(block_logits, temperature)
-        probs = F.softmax(block_logits.to(torch.float32), dim=-1)
-        x0_p = probs.gather(dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
+        trace_topk = max(1, int(self.token_merge_top_k))
+        full_block_before = block_tokens.clone()
+        top1_tokens = self._sample_argmax(block_logits, temperature)
+        mask_index = full_block_before.eq(mask_id)
+        mask_positions = torch.nonzero(mask_index, as_tuple=False).flatten()
+        if self._fast_prob_path:
+            # Fast path: only compute exact confidence for mask positions.
+            top1_confidence = torch.ones(top1_tokens.shape, dtype=torch.float32, device=top1_tokens.device)
+            if mask_positions.numel() > 0:
+                mask_logits_fp32 = block_logits.index_select(0, mask_positions).to(torch.float32)
+                mask_top1 = top1_tokens.index_select(0, mask_positions).unsqueeze(-1)
+                mask_top1_logits = mask_logits_fp32.gather(dim=-1, index=mask_top1).squeeze(-1)
+                mask_lse = torch.logsumexp(mask_logits_fp32, dim=-1)
+                top1_confidence[mask_positions] = torch.exp(mask_top1_logits - mask_lse)
+            topk_ids = top1_tokens.unsqueeze(-1)
+            topk_probs = top1_confidence.unsqueeze(-1)
+        else:
+            logits_fp32 = block_logits.to(torch.float32)
+            top1_logits = logits_fp32.gather(dim=-1, index=top1_tokens.unsqueeze(-1)).squeeze(-1)
+            logsumexp = torch.logsumexp(logits_fp32, dim=-1)
+            top1_confidence = torch.exp(top1_logits - logsumexp)
+            k = min(trace_topk, int(logits_fp32.shape[-1]))
+            topk_logits, topk_ids = torch.topk(logits_fp32, k=k, dim=-1)
+            topk_probs = torch.exp(topk_logits - logsumexp.unsqueeze(-1))
 
-        lower_index = x0_p < remask_threshold
-        remask_index = torch.logical_and(lower_index, torch.logical_not(mask_index))
-        mask_new = torch.logical_or(lower_index, mask_index)
-        if not bool(mask_new.any().item()):
-            return {}, {}
+        target_tokens = full_block_before.clone()
+        token_index = full_block_before.ne(mask_id)
+        if bool(token_index.any().item()):
+            target_tokens[token_index] = top1_tokens[token_index]
 
-        neg_inf = torch.full_like(x0_p, torch.finfo(x0_p.dtype).min)
-        confidence = torch.where(mask_new, x0_p, neg_inf)
-        transfer_index = self._segment_max_transfer(mask_new, confidence)
-
-        transfer_index = torch.logical_and(transfer_index, confidence > accept_threshold)
-        transfer_index = torch.logical_or(transfer_index, confidence > accept_threshold)
-
-        gap = int(remask_index.sum().item() + 1 - transfer_index.sum().item())
-        if gap > 0:
-            candidate_conf = confidence.clone()
-            candidate_conf[transfer_index] = torch.finfo(candidate_conf.dtype).min
-            extra_k = min(gap, int(mask_new.sum().item()))
-            if extra_k > 0:
-                _, indices = torch.topk(candidate_conf, extra_k, largest=True, sorted=False)
-                transfer_index[indices] = True
-
-        remask_index = torch.logical_and(remask_index, torch.logical_not(transfer_index))
-        x0[remask_index] = mask_id
-        transfer_index[remask_index] = True
+        decode_positions = torch.empty(0, dtype=torch.long, device=full_block_before.device)
+        below_threshold_positions = torch.empty(0, dtype=torch.long, device=full_block_before.device)
+        if bool(mask_index.any().item()):
+            mask_confidence = top1_confidence[mask_positions]
+            below_threshold = torch.nonzero(mask_confidence < accept_threshold, as_tuple=False).flatten()
+            if below_threshold.numel() > 0:
+                below_threshold_positions = mask_positions[below_threshold]
+            if below_threshold.numel() == 0:
+                decode_upto = int(mask_positions.numel())
+            elif int(below_threshold[0].item()) == 0:
+                decode_upto = 1
+            else:
+                decode_upto = int(below_threshold[0].item())
+            decode_positions = mask_positions[:decode_upto]
+            if decode_positions.numel() > 0:
+                target_tokens[decode_positions] = top1_tokens[decode_positions]
 
         block_writes: dict[int, int] = {}
         token_merge_entries: dict[int, dict | None] = {}
-        for rel_idx in torch.where(transfer_index)[0].tolist():
-            token = int(x0[rel_idx].item())
-            if token != int(block_tokens[rel_idx].item()):
-                block_writes[int(editable_start + rel_idx)] = token
-            token_merge_entries[int(editable_start + rel_idx)] = self._build_token_merge_descriptor(
-                probs=probs[rel_idx],
-                token=token,
-                mask_id=mask_id,
-            )
+        changed_positions = torch.nonzero(target_tokens.ne(full_block_before), as_tuple=False).flatten()
+        same_as_previous = not bool(changed_positions.numel())
+        all_confident = bool((top1_confidence >= 0.9).all().item()) if top1_confidence.numel() > 0 else True
+        for rel_idx in changed_positions.tolist():
+            if int(rel_idx) < editable_start:
+                continue
+            token = int(target_tokens[rel_idx].item())
+            if token != int(full_block_before[rel_idx].item()):
+                block_writes[int(rel_idx)] = token
 
-        return block_writes, token_merge_entries
+        if self._enable_token_merge:
+            non_mask_positions = torch.nonzero(target_tokens.ne(mask_id), as_tuple=False).flatten()
+            for rel_idx in non_mask_positions.tolist():
+                if int(rel_idx) < editable_start:
+                    continue
+                token = int(target_tokens[rel_idx].item())
+                if self._token_merge_mode == "dmax_topk":
+                    descriptor = self._build_manual_token_merge_descriptor(
+                        token=token,
+                        confidence=float(top1_confidence[rel_idx].item()),
+                        mask_id=mask_id,
+                    )
+                else:
+                    row_probs = F.softmax(block_logits[rel_idx].to(torch.float32), dim=-1)
+                    descriptor = self._build_token_merge_descriptor(
+                        probs=row_probs,
+                        token=token,
+                        mask_id=mask_id,
+                    )
+                token_merge_entries[int(rel_idx)] = descriptor
+
+        full_block_after = target_tokens
+        editable_tokens = full_block_before[editable_start:]
+        editable_tokens_after = full_block_after[editable_start:]
+        mask_positions_editable = mask_positions[mask_positions >= editable_start] - editable_start
+        decode_positions_editable = decode_positions[decode_positions >= editable_start] - editable_start
+        below_threshold_positions_editable = (
+            below_threshold_positions[below_threshold_positions >= editable_start] - editable_start
+        )
+        dmax_trace = {
+            "editable_start": int(editable_start),
+            "block_before": full_block_before.tolist(),
+            "block_after": full_block_after.tolist(),
+            "editable_tokens_before": editable_tokens.tolist(),
+            "editable_tokens_after": editable_tokens_after.tolist(),
+            # Keep legacy fields in editable-relative coordinates for compatibility.
+            "mask_positions": [int(x) for x in mask_positions_editable.tolist()],
+            "decode_positions": [int(x) for x in decode_positions_editable.tolist()],
+            "below_threshold_positions": [int(x) for x in below_threshold_positions_editable.tolist()],
+            # Add block-relative coordinates to align with reference generate_spd traces.
+            "mask_positions_block": [int(x) for x in mask_positions.tolist()],
+            "decode_positions_block": [int(x) for x in decode_positions.tolist()],
+            "below_threshold_positions_block": [int(x) for x in below_threshold_positions.tolist()],
+            "token_index": token_index.to(torch.int).tolist(),
+            "top1_tokens": top1_tokens.tolist(),
+            "top1_confidence": top1_confidence.tolist(),
+            "topk_ids": topk_ids.tolist(),
+            "topk_probs": topk_probs.tolist(),
+            "writes": {int(rel_idx): int(token) for rel_idx, token in block_writes.items()},
+        }
+
+        return block_writes, token_merge_entries, {
+            "committable": bool(same_as_previous or all_confident),
+            "same_as_previous": bool(same_as_previous),
+            "all_confident": bool(all_confident),
+        }, dmax_trace
+
+    def _reset_block_state_map(self) -> None:
+        self._last_block_state_map = {}
+
+    def _reset_dmax_trace_map(self) -> None:
+        self._last_dmax_trace_map = {}
 
     def _build_edit_writes_map(
         self,
@@ -170,32 +255,66 @@ class LLaDA2DMaxSampler(TokenMergeSamplerMixin, LLaDA2dot1Sampler):
         del sample_output, kwargs
         edit_writes_map: dict[str, dict[str, dict[int, int]]] = {}
         self._reset_token_merge_map()
+        self._reset_block_state_map()
+        self._reset_dmax_trace_map()
         for req_idx, (req, req_logits) in enumerate(zip(reqs, split_logits)):
             req_id_str = str(req.req_id)
             req_edit_writes: dict[str, dict[int, int]] = {}
             req_token_merge: dict[int, dict | None] = {}
+            req_block_states: dict[str, dict] = {}
+            req_dmax_trace: dict[str, dict] = {}
             for block_id, block in enumerate(req.dllm_blocks):
                 if not block.is_active:
                     continue
+                req_block_states[str(block_id)] = {
+                    "committable": False,
+                    "same_as_previous": False,
+                    "all_confident": False,
+                }
                 block_logits = self._extract_block_logits(req, req_logits, block, attn_metadata.is_prefill[req_idx])
                 if block_logits is None or block_logits.shape[0] != int(block.block_size):
                     continue
                 for rel_idx in range(int(block.block_size)):
                     req_token_merge.setdefault(int(block.start + rel_idx), None)
                 block_tokens = torch.tensor(block.token_ids, dtype=torch.long, device=block_logits.device)
-                block_writes, token_merge_entries = self._build_dmax_block_outputs(
+                block_writes, token_merge_entries, block_state, dmax_trace = self._build_dmax_block_outputs(
                     block=block,
                     block_tokens=block_tokens,
                     block_logits=block_logits,
                     temperature=float(temperatures[req_idx].item()),
                 )
+                req_block_states[str(block_id)] = block_state
+                req_dmax_trace[str(block_id)] = dmax_trace
                 if block_writes:
                     req_edit_writes[str(block_id)] = block_writes
                 for rel_idx, descriptor in token_merge_entries.items():
                     req_token_merge[int(block.start + rel_idx)] = descriptor
             edit_writes_map[req_id_str] = req_edit_writes
             self._set_token_merge_entries(req_id_str, req_token_merge)
+            self._last_block_state_map[req_id_str] = req_block_states
+            self._last_dmax_trace_map[req_id_str] = req_dmax_trace
         return edit_writes_map
+
+    def _postprocess_sample_output(
+        self,
+        reqs,
+        split_logits,
+        temperatures: torch.Tensor,
+        sample_output,
+        attn_metadata,
+        **kwargs,
+    ):
+        sample_output = super()._postprocess_sample_output(
+            reqs=reqs,
+            split_logits=split_logits,
+            temperatures=temperatures,
+            sample_output=sample_output,
+            attn_metadata=attn_metadata,
+            **kwargs,
+        )
+        sample_output.block_state_map = self._last_block_state_map
+        sample_output.dmax_trace_map = self._last_dmax_trace_map
+        return sample_output
 
 
 def build_llada2_sampler(config=None):

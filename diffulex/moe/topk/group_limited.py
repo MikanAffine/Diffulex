@@ -1,11 +1,58 @@
 from __future__ import annotations
 
+import os
 import torch
 from einops import rearrange, repeat
 
 from diffulex.moe.topk.base import TopKRouter
 from diffulex.moe.topk.output import TopKOutput
 from diffulex_kernel import fused_group_limited_topk
+
+
+def _tile_kernels_group_limited_topk(
+    scores: torch.Tensor,
+    *,
+    top_k: int,
+    n_group: int,
+    topk_group: int,
+) -> torch.Tensor | None:
+    try:
+        import tile_kernels  # type: ignore
+    except Exception:
+        return None
+
+    if (
+        n_group <= 0
+        or topk_group <= 0
+        or n_group > int(scores.shape[-1])
+        or int(scores.shape[-1]) % n_group != 0
+    ):
+        try:
+            return tile_kernels.moe.topk_gate(scores, top_k)
+        except Exception:
+            return None
+
+    experts_per_group = int(scores.shape[-1]) // n_group
+    scores_by_group = rearrange(scores, "token (group expert) -> token group expert", group=n_group)
+    num_group_sum_topk = min(2, experts_per_group)
+    num_topk_groups = min(topk_group, n_group)
+    try:
+        group_idx = tile_kernels.moe.topk_sum_and_topk_group_idx(
+            scores_by_group,
+            num_group_sum_topk,
+            num_topk_groups,
+        )
+        group_mask = torch.zeros(
+            (scores.shape[0], n_group),
+            dtype=torch.bool,
+            device=scores.device,
+        )
+        group_mask.scatter_(1, group_idx.to(torch.int64), True)
+        score_mask = repeat(group_mask, "token group -> token (group expert)", expert=experts_per_group)
+        masked_scores = scores.masked_fill(~score_mask, float("-inf"))
+        return tile_kernels.moe.topk_gate(masked_scores, top_k)
+    except Exception:
+        return None
 
 
 class GroupLimitedTopKRouter(TopKRouter):
@@ -63,7 +110,21 @@ class GroupLimitedTopKRouter(TopKRouter):
     def _forward_naive(self, router_logits: torch.Tensor) -> TopKOutput:
         scores = torch.sigmoid(router_logits.float()).to(router_logits.dtype)
         expert_bias = self._expert_bias_getter().to(scores.device, dtype=scores.dtype)
-        topk_ids = self._group_limited_topk(scores + expert_bias)
+        rank_scores = scores + expert_bias
+        topk_ids = None
+        if (
+            router_logits.is_cuda
+            and os.getenv("DIFFULEX_MOE_TOPK_IMPL", "").lower() in {"tile", "tilekernels", "tile_kernels"}
+        ):
+            topk_ids = _tile_kernels_group_limited_topk(
+                rank_scores,
+                top_k=self.top_k,
+                n_group=self.n_group,
+                topk_group=self.topk_group,
+            )
+        if topk_ids is None:
+            topk_ids = self._group_limited_topk(rank_scores)
+        topk_ids = topk_ids.to(torch.int64)
         topk_weights = torch.gather(scores, dim=-1, index=topk_ids)
         if self.renormalize and self.top_k > 1:
             topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
@@ -71,7 +132,7 @@ class GroupLimitedTopKRouter(TopKRouter):
         return TopKOutput(weights=topk_weights, ids=topk_ids, router_logits=router_logits)
 
     def forward(self, router_logits: torch.Tensor) -> TopKOutput:
-        if not router_logits.is_cuda:
+        if not router_logits.is_cuda or os.getenv("DIFFULEX_REFERENCE_MOE_ROUTER", "0") == "1":
             return self._forward_naive(router_logits)
 
         expert_bias = self._expert_bias_getter().to(router_logits.device, dtype=router_logits.dtype)

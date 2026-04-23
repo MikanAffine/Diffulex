@@ -33,6 +33,9 @@ class DllmBlock:
 
     block_type: DllmBlockType = DllmBlockType.IN_CONTEXT
     editable_start: int = 0
+    commit_ready: bool = False
+    same_as_previous: bool = False
+    all_confident: bool = False
 
     def __repr__(self):
         prev_block_id = self.prev_block.block_id if self.prev_block is not None else None
@@ -53,6 +56,8 @@ class DllmBlock:
 
         if self.status is None:
             self.status = DllmBlockStatus.TO_CACHE if self.is_complete else DllmBlockStatus.ACTIVE
+        if self.is_complete:
+            self.commit_ready = True
 
         self.make_in_context()
 
@@ -174,6 +179,7 @@ class DllmBlock:
                 f"rel_idx={rel_idx}, editable_start={self.editable_start}"
             )
         self.req.token_ids[self.start + rel_idx] = token_id
+        self.commit_ready = False
 
     def write_tokens_parallel(self, token_ids: torch.Tensor, abs_ids: torch.Tensor):
         token_ids_list = token_ids.tolist() if isinstance(token_ids, torch.Tensor) else list(token_ids)
@@ -185,6 +191,8 @@ class DllmBlock:
                     f"abs_idx={abs_idx}, editable_start={self.editable_start}"
                 )
             self.req.token_ids[int(abs_idx)] = int(token_id)
+        if abs_ids_list:
+            self.commit_ready = False
 
     def to_cache(self):
         if self.is_active:

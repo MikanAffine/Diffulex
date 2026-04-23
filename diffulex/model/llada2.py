@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,6 +22,53 @@ from diffulex.moe.layer.naive_impl import NaiveFusedMoE
 from diffulex.moe.topk import GroupLimitedTopKRouter
 from diffulex.distributed.parallel_state import fetch_parallel_state
 from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
+
+
+_LLADA2_DEBUG_STATE: dict[str, object] = {
+    "enabled": False,
+    "include_qkv": False,
+    "capture": None,
+}
+
+
+def _llada2_debug_enabled() -> bool:
+    return bool(_LLADA2_DEBUG_STATE["enabled"])
+
+
+def _llada2_debug_include_qkv() -> bool:
+    return bool(_LLADA2_DEBUG_STATE["include_qkv"])
+
+
+def _llada2_debug_store(name: str, value: torch.Tensor) -> None:
+    if not _llada2_debug_enabled():
+        return
+    capture = _LLADA2_DEBUG_STATE.get("capture")
+    if capture is None:
+        return
+    capture[name] = value.detach()
+
+
+def _llada2_debug_store_nested(group: str, name: str, value: torch.Tensor) -> None:
+    if not _llada2_debug_enabled():
+        return
+    capture = _LLADA2_DEBUG_STATE.get("capture")
+    if capture is None:
+        return
+    nested = capture.setdefault(group, {})
+    nested[name] = value.detach()
+
+
+def _llada2_use_reference_view_path() -> bool:
+    return os.getenv("DIFFULEX_LLADA2_REFERENCE_VIEW_PATH", "0") == "1"
+
+
+def _llada2_use_legacy_qkv_path() -> bool:
+    return os.getenv("DIFFULEX_LLADA2_LEGACY_QKV_PATH", "0") == "1"
+
+
+def _llada2_gate_use_fp32() -> bool:
+    # Keep fp32 gate as default for alignment; allow explicit opt-out for perf probing.
+    return os.getenv("DIFFULEX_LLADA2_GATE_FP32", "1") != "0"
 
 
 class LLaDA2QKVParallelLinear(nn.Module):
@@ -98,6 +146,7 @@ class LLaDA2Attention(nn.Module):
             config.hidden_size,
             bias=bool(getattr(config, "use_bias", False)),
         )
+        self.dense.tp_all_reduce_kind = "attn_dense"
         partial_rotary_factor = float(getattr(config, "partial_rotary_factor", 1.0))
         rotary_dim = int(self.head_dim * partial_rotary_factor)
         rotary_dim = int(getattr(config, "rotary_dim", rotary_dim) or rotary_dim)
@@ -109,6 +158,31 @@ class LLaDA2Attention(nn.Module):
         )
         self.attn = Attention(self.num_heads, self.head_dim, self.scaling, self.num_kv_heads)
 
+    def _split_qkv_reference(
+        self,
+        qkv: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tokens = qkv.size(0)
+        qkv = qkv.view(tokens, self.num_heads + 2 * self.num_kv_heads, self.head_dim)
+        q = qkv[:, : self.num_heads, :]
+        k = qkv[:, self.num_heads : self.num_heads + self.num_kv_heads, :]
+        v = qkv[:, self.num_heads + self.num_kv_heads :, :]
+        return q, k, v
+
+    def _split_qkv_default(
+        self,
+        qkv: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
+        q = rearrange(q, "token (head head_dim) -> token head head_dim", head=self.num_heads)
+        k = rearrange(k, "token (head head_dim) -> token head head_dim", head=self.num_kv_heads)
+        v = rearrange(v, "token (head head_dim) -> token head head_dim", head=self.num_kv_heads)
+        return q, k, v
+
+    @staticmethod
+    def _flatten_heads(x: torch.Tensor) -> torch.Tensor:
+        return x.reshape(x.shape[0], -1)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -116,21 +190,67 @@ class LLaDA2Attention(nn.Module):
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv = self.query_key_value(hidden_states)
-        q, k, v = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
-        q = rearrange(
-            self.query_layernorm(
-                rearrange(q, "token (head head_dim) -> token head head_dim", head=self.num_heads)
-            ),
-            "token head head_dim -> token (head head_dim)",
-        )
-        k = rearrange(
-            self.key_layernorm(
-                rearrange(k, "token (head head_dim) -> token head head_dim", head=self.num_kv_heads)
-            ),
-            "token head head_dim -> token (head head_dim)",
-        )
+        if _llada2_debug_include_qkv():
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_qkv_linear", qkv)
+        if _llada2_use_legacy_qkv_path():
+            q, k, v = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
+            q = rearrange(
+                self.query_layernorm(
+                    rearrange(q, "token (head head_dim) -> token head head_dim", head=self.num_heads)
+                ),
+                "token head head_dim -> token (head head_dim)",
+            )
+            k = rearrange(
+                self.key_layernorm(
+                    rearrange(k, "token (head head_dim) -> token head head_dim", head=self.num_kv_heads)
+                ),
+                "token head head_dim -> token (head head_dim)",
+            )
+            q, k = self.rotary_emb(positions, q, k)
+            return self.dense(self.attn(q, k, v, mask))
+        if _llada2_use_reference_view_path():
+            q, k, v = self._split_qkv_reference(qkv)
+        else:
+            q, k, v = self._split_qkv_default(qkv)
+        if _llada2_debug_include_qkv():
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_q_pre_norm", q)
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_k_pre_norm", k)
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_v_heads", v)
+        q = self.query_layernorm(q)
+        k = self.key_layernorm(k)
+        if _llada2_debug_include_qkv():
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_q_post_norm", q)
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_k_post_norm", k)
+            cos_sin = self.rotary_emb.cos_sin_cache[positions]
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_rope_cos", cos)
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_rope_sin", sin)
         q, k = self.rotary_emb(positions, q, k)
-        return self.dense(self.attn(q, k, v, mask))
+        if _llada2_debug_include_qkv():
+            _llada2_debug_store_nested(
+                "qkv",
+                f"layer_{self.layer_idx}_q",
+                self._flatten_heads(q),
+            )
+            _llada2_debug_store_nested(
+                "qkv",
+                f"layer_{self.layer_idx}_k",
+                self._flatten_heads(k),
+            )
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_q_rotary", q)
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_k_rotary", k)
+            _llada2_debug_store_nested(
+                "qkv",
+                f"layer_{self.layer_idx}_v",
+                self._flatten_heads(v),
+            )
+        attn_out = self.attn(q, k, v, mask)
+        if _llada2_debug_include_qkv():
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_attn_out", attn_out)
+        attn_out = self.dense(attn_out)
+        if _llada2_debug_include_qkv():
+            _llada2_debug_store_nested("qkv", f"layer_{self.layer_idx}_attn_output_post_dense", attn_out)
+        return attn_out
 
 
 class LLaDA2DenseMLP(nn.Module):
@@ -140,6 +260,7 @@ class LLaDA2DenseMLP(nn.Module):
         self.gate_proj = ColumnParallelLinear(config.hidden_size, intermediate_size, bias=False)
         self.up_proj = ColumnParallelLinear(config.hidden_size, intermediate_size, bias=False)
         self.down_proj = RowParallelLinear(intermediate_size, config.hidden_size, bias=False)
+        self.down_proj.tp_all_reduce_kind = "mlp_down_proj"
         if getattr(config, "hidden_act", "silu") != "silu":
             raise NotImplementedError("LLaDA2 dense MLP currently supports only silu.")
         self.act_fn = SiluAndMul()
@@ -163,10 +284,17 @@ class LLaDA2MoEMixin:
         )
 
     def _forward_llada2_gate(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return F.linear(hidden_states.to(torch.float32), self.gate.weight.to(torch.float32))
+        if _llada2_gate_use_fp32():
+            logits = F.linear(hidden_states.to(torch.float32), self.gate.weight.to(torch.float32))
+        else:
+            logits = F.linear(hidden_states, self.gate.weight)
+        if os.getenv("DIFFULEX_DISABLE_EXPERT_BIAS", "0") == "1":
+            # Debug toggle: keep checkpoint loading intact but ignore expert bias at runtime.
+            self.gate.expert_bias.zero_()
+        return logits
 
     def resolve_checkpoint_weight(self, suffix: str, ctx: LoadContext) -> ResolvedWeight | None:
-        if suffix == "gate.e_score_correction_bias":
+        if suffix in {"gate.e_score_correction_bias", "gate.expert_bias"}:
             return ResolvedWeight(buffer=self.gate.expert_bias)
 
         return super().resolve_checkpoint_weight(suffix, ctx)
@@ -263,13 +391,58 @@ class LLaDA2DecoderLayer(nn.Module):
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         residual = hidden_states
+        if _llada2_debug_enabled():
+            _llada2_debug_store_nested(
+                "decoder",
+                f"layer_{self.layer_idx}_residual_in",
+                residual,
+            )
         hidden_states = self.input_layernorm(hidden_states)
+        if _llada2_debug_enabled():
+            _llada2_debug_store_nested(
+                "decoder",
+                f"layer_{self.layer_idx}_post_input_layernorm",
+                hidden_states,
+            )
         hidden_states = residual + self.attention(positions, hidden_states, mask)
+        if _llada2_debug_enabled():
+            _llada2_debug_store_nested(
+                "decoder",
+                f"layer_{self.layer_idx}_post_attention_residual",
+                hidden_states,
+            )
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        if _llada2_debug_enabled():
+            _llada2_debug_store_nested(
+                "decoder",
+                f"layer_{self.layer_idx}_post_attention_layernorm",
+                hidden_states,
+            )
         mlp_output = self.mlp(hidden_states)
-        hidden_states = mlp_output[0] if isinstance(mlp_output, tuple) else mlp_output
-        return residual + hidden_states
+        if isinstance(mlp_output, tuple):
+            hidden_states, router_logits = mlp_output
+            if _llada2_debug_enabled():
+                _llada2_debug_store_nested(
+                    "moe",
+                    f"layer_{self.layer_idx}_router_logits",
+                    router_logits,
+                )
+                _llada2_debug_store_nested(
+                    "moe",
+                    f"layer_{self.layer_idx}_moe_output",
+                    hidden_states,
+                )
+        else:
+            hidden_states = mlp_output
+        hidden_states = residual + hidden_states
+        if _llada2_debug_enabled():
+            _llada2_debug_store_nested(
+                "decoder",
+                f"layer_{self.layer_idx}_layer_out",
+                hidden_states,
+            )
+        return hidden_states
 
 
 class LLaDA2Model(nn.Module):
@@ -289,6 +462,21 @@ class LLaDA2Model(nn.Module):
             [LLaDA2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self._last_debug_dump: dict[str, object] | None = None
+
+    def enable_debug_dump(self, *, include_qkv: bool = False) -> None:
+        _LLADA2_DEBUG_STATE["enabled"] = True
+        _LLADA2_DEBUG_STATE["include_qkv"] = bool(include_qkv)
+
+    def disable_debug_dump(self) -> None:
+        _LLADA2_DEBUG_STATE["enabled"] = False
+        _LLADA2_DEBUG_STATE["include_qkv"] = False
+        _LLADA2_DEBUG_STATE["capture"] = None
+
+    def pop_last_debug_dump(self) -> dict[str, object] | None:
+        dump = self._last_debug_dump
+        self._last_debug_dump = None
+        return dump
 
     def forward(
         self,
@@ -296,11 +484,25 @@ class LLaDA2Model(nn.Module):
         positions: torch.Tensor,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        debug_enabled = _llada2_debug_enabled()
+        if debug_enabled:
+            _LLADA2_DEBUG_STATE["capture"] = {}
         hidden_states = self.word_embeddings(input_ids)
+        if debug_enabled:
+            _llada2_debug_store("embed_in", hidden_states)
         hidden_states = self._maybe_apply_token_merging(hidden_states)
+        if debug_enabled:
+            _llada2_debug_store("post_token_merge", hidden_states)
         for layer in self.layers:
             hidden_states = layer(positions, hidden_states, mask)
-        return self.norm(hidden_states)
+            if debug_enabled:
+                _llada2_debug_store(f"layer_{layer.layer_idx}_out", hidden_states)
+        hidden_states = self.norm(hidden_states)
+        if debug_enabled:
+            _llada2_debug_store("final_norm", hidden_states)
+            self._last_debug_dump = _LLADA2_DEBUG_STATE["capture"]
+            _LLADA2_DEBUG_STATE["capture"] = None
+        return hidden_states
 
     def _maybe_apply_token_merging(self, hidden_states: torch.Tensor) -> torch.Tensor:
         from diffulex.attention import fetch_attn_metadata
@@ -341,15 +543,19 @@ class LLaDA2Model(nn.Module):
             token=topk_ids.shape[0],
             topk=topk_ids.shape[1],
         )
+        merge_dtype = hidden_states.dtype
+        topk_embeds_merge = topk_embeds.to(dtype=merge_dtype)
+        topk_probs_merge = topk_probs.to(dtype=merge_dtype)
+        residual_probs_merge = residual_probs.to(dtype=merge_dtype)
         topk_weighted = reduce(
-            topk_embeds.to(torch.float32) * rearrange(topk_probs, "token topk -> token topk 1"),
+            topk_embeds_merge * rearrange(topk_probs_merge, "token topk -> token topk 1"),
             "token topk hidden -> token hidden",
             "sum",
         )
 
         if merge_mode == "dmax_topk":
             if self.mask_token_id_tensor is not None and self.mask_token_id == int(mask_token_id):
-                mask_embed = self.word_embeddings(self.mask_token_id_tensor).to(torch.float32)
+                mask_embed = self.word_embeddings(self.mask_token_id_tensor).to(dtype=merge_dtype)
             else:
                 if torch.cuda.is_current_stream_capturing():
                     raise RuntimeError(
@@ -357,16 +563,24 @@ class LLaDA2Model(nn.Module):
                         f"attn_metadata mask token id (model={self.mask_token_id}, metadata={mask_token_id})."
                     )
                 mask_id = torch.tensor([int(mask_token_id)], dtype=torch.int64, device=device)
-                mask_embed = self.word_embeddings(mask_id).to(torch.float32)
-            soft_embeds = topk_weighted + mask_embed * residual_probs
-
+                mask_embed = self.word_embeddings(mask_id).to(dtype=merge_dtype)
+            # Match native generate_spd's embedding-dtype blend and only lift norm
+            # calculations to float temporarily.
+            soft_embeds = topk_weighted + mask_embed * residual_probs_merge
+            
             if attn_metadata.token_merge_renormalize:
-                current_norm = torch.norm(soft_embeds, p=2, dim=-1, keepdim=True)
-                topk_norms = torch.norm(topk_embeds.to(torch.float32), p=2, dim=-1)
-                expected_topk_norm = (topk_norms * topk_probs).sum(dim=-1, keepdim=True)
-                expected_mask_norm = torch.norm(mask_embed, p=2, dim=-1, keepdim=True) * residual_probs
+                current_norm = torch.linalg.vector_norm(
+                    soft_embeds.float(), dim=-1, keepdim=True
+                ).clamp_min(1e-12).to(dtype=merge_dtype)
+                topk_norms = torch.linalg.vector_norm(
+                    topk_embeds.float(), dim=-1
+                ).to(dtype=merge_dtype)
+                expected_topk_norm = (topk_norms * topk_probs_merge).sum(dim=-1, keepdim=True)
+                expected_mask_norm = torch.linalg.vector_norm(
+                    mask_embed.float(), dim=-1, keepdim=True
+                ).to(dtype=merge_dtype) * residual_probs_merge
                 target_norm = expected_topk_norm + expected_mask_norm
-                soft_embeds = soft_embeds * (target_norm / (current_norm + 1e-6))
+                soft_embeds = soft_embeds * (target_norm / current_norm)
         elif merge_mode == "iter_smooth_topk":
             merge_weight = float(attn_metadata.token_merge_weight)
             soft_embeds = hidden_states.to(torch.float32) + merge_weight * topk_weighted

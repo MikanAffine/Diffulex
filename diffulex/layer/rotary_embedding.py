@@ -44,25 +44,29 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Derive shapes from the tensors being viewed to keep SymInts consistent for torch.compile.
-        # This avoids FakeTensor failing to prove equality between independent symbolic dims
-        # coming from positions.size(0) vs query.size(0).
-        q_tokens = query.size(0)
-        k_tokens = key.size(0)
-
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
-
-        # Reshape using only sizes from the target tensor for Dynamo friendliness
         query_shape = query.shape
-        nheads_q = query_shape[-1] // self.head_size
-        query = query.view(q_tokens, nheads_q, self.head_size)
-        query = apply_rotary_emb(query, cos, sin).view(query_shape)
-
         key_shape = key.shape
-        nheads_k = key_shape[-1] // self.head_size
-        key = key.view(k_tokens, nheads_k, self.head_size)
-        key = apply_rotary_emb(key, cos, sin).view(key_shape)
+        if query.dim() == 2:
+            q_tokens = query.size(0)
+            nheads_q = query_shape[-1] // self.head_size
+            query = query.view(q_tokens, nheads_q, self.head_size)
+            query = apply_rotary_emb(query, cos, sin).view(query_shape)
+        elif query.dim() == 3:
+            query = apply_rotary_emb(query, cos, sin)
+        else:
+            raise ValueError(f"Unsupported query ndim for RotaryEmbedding: {query.dim()}")
+
+        if key.dim() == 2:
+            k_tokens = key.size(0)
+            nheads_k = key_shape[-1] // self.head_size
+            key = key.view(k_tokens, nheads_k, self.head_size)
+            key = apply_rotary_emb(key, cos, sin).view(key_shape)
+        elif key.dim() == 3:
+            key = apply_rotary_emb(key, cos, sin)
+        else:
+            raise ValueError(f"Unsupported key ndim for RotaryEmbedding: {key.dim()}")
         return query, key
 
 
@@ -93,17 +97,23 @@ class PartialRotaryEmbedding(nn.Module):
         positions: torch.Tensor,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        tokens = x.size(0)
-        x_shape = x.shape
-        nheads = x_shape[-1] // self.head_size
-        x = x.view(tokens, nheads, self.head_size)
-        x_rot = x[..., : self.rotary_dim]
-        x_pass = x[..., self.rotary_dim :]
-
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        x_rot = apply_rotary_emb(x_rot, cos, sin)
-        return torch.cat((x_rot, x_pass), dim=-1).view(x_shape)
+        x_shape = x.shape
+        if x.dim() == 2:
+            tokens = x.size(0)
+            nheads = x_shape[-1] // self.head_size
+            x = x.view(tokens, nheads, self.head_size)
+            x_rot = x[..., : self.rotary_dim]
+            x_pass = x[..., self.rotary_dim :]
+            x_rot = apply_rotary_emb(x_rot, cos, sin)
+            return torch.cat((x_rot, x_pass), dim=-1).view(x_shape)
+        if x.dim() == 3:
+            x_rot = x[..., : self.rotary_dim]
+            x_pass = x[..., self.rotary_dim :]
+            x_rot = apply_rotary_emb(x_rot, cos, sin)
+            return torch.cat((x_rot, x_pass), dim=-1)
+        raise ValueError(f"Unsupported x ndim for PartialRotaryEmbedding: {x.dim()}")
 
     def forward(
         self,

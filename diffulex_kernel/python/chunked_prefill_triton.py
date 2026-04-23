@@ -6,19 +6,33 @@ import triton.language as tl
 from diffulex.attention.metadata import AttnMetaDataBase
 from diffulex_kernel.python.auto_tuner import build_chunked_prefill_configs
 
+
+def _env_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
 DISABLE_CHUNKED_PREFILL_AUTOTUNE = os.environ.get("DIFFULEX_DISABLE_CHUNKED_PREFILL_AUTOTUNE", "0") == "1"
+PINNED_BLOCK_M = _env_int("DIFFULEX_CHUNKED_PREFILL_BLOCK_M")
+PINNED_BLOCK_N = _env_int("DIFFULEX_CHUNKED_PREFILL_BLOCK_N")
+PINNED_NUM_WARPS = _env_int("DIFFULEX_CHUNKED_PREFILL_NUM_WARPS")
+PINNED_NUM_STAGES = _env_int("DIFFULEX_CHUNKED_PREFILL_NUM_STAGES")
+USE_PINNED_CHUNKED_PREFILL_CONFIG = PINNED_BLOCK_M is not None and PINNED_BLOCK_N is not None
 
 
 def _prune_chunked_prefill_configs(configs, _nargs, **kwargs):
     """Keep autotune numerically stable across page sizes for small decode blocks.
 
-    For small DLLM blocks, varying the cache-stage tile shape changes the softmax
-    reduction order enough to flip greedy decoding across page sizes. Constrain
-    those cases to the stable launch shape; keep the full search space for larger
-    blocks where we haven't observed correctness regressions.
+    For very small DLLM blocks, varying the cache-stage tile shape changes the
+    softmax reduction order enough to flip greedy decoding across page sizes.
+    Constrain only those tiny block-causal cases to the stable launch shape and
+    keep the wider search space elsewhere.
     """
     dllm_block_size = kwargs.get("DLLM_BLOCK_SIZE")
-    if dllm_block_size is None or dllm_block_size > 16:
+    is_block_causal = bool(kwargs.get("IS_BLOCK_CAUSAL", False))
+    if dllm_block_size is None or dllm_block_size > 16 or not is_block_causal:
         return configs
 
     stable_configs = [
@@ -36,7 +50,7 @@ def maybe_autotune(fn):
     fn = triton.jit(fn)
     # NOTE: Tests pass explicit BLOCK_M / BLOCK_N meta-parameters, which conflicts with
     # Triton autotune. Disable autotune under test/debug via env instead of editing code.
-    if DISABLE_CHUNKED_PREFILL_AUTOTUNE:
+    if DISABLE_CHUNKED_PREFILL_AUTOTUNE or USE_PINNED_CHUNKED_PREFILL_CONFIG:
         return fn
     return triton.autotune(
         configs=[
@@ -301,7 +315,11 @@ def _run_chunked_prefill_attn_unified_kernel(
     page_size = k_cache.shape[1]
     num_reqs = attn_metadata.cu_seqlens_q.shape[0] - 1
 
-    if DISABLE_CHUNKED_PREFILL_AUTOTUNE:
+    if USE_PINNED_CHUNKED_PREFILL_CONFIG:
+        block_m = PINNED_BLOCK_M
+        block_n = PINNED_BLOCK_N
+        grid = (num_reqs, num_heads, triton.cdiv(int(attn_metadata.max_seqlen_q), block_m))
+    elif DISABLE_CHUNKED_PREFILL_AUTOTUNE:
         block_m = 64
         block_n = 64
         grid = (num_reqs, num_heads, triton.cdiv(int(attn_metadata.max_seqlen_q), block_m))
@@ -311,9 +329,13 @@ def _run_chunked_prefill_attn_unified_kernel(
         grid = lambda meta: (num_reqs, num_heads, triton.cdiv(int(attn_metadata.max_seqlen_q), meta["BLOCK_M"]))
 
     launch_kwargs = {}
-    if DISABLE_CHUNKED_PREFILL_AUTOTUNE:
+    if USE_PINNED_CHUNKED_PREFILL_CONFIG or DISABLE_CHUNKED_PREFILL_AUTOTUNE:
         launch_kwargs["BLOCK_M"] = block_m
         launch_kwargs["BLOCK_N"] = block_n
+    if PINNED_NUM_WARPS is not None:
+        launch_kwargs["num_warps"] = PINNED_NUM_WARPS
+    if PINNED_NUM_STAGES is not None:
+        launch_kwargs["num_stages"] = PINNED_NUM_STAGES
 
     _chunked_prefill_attn_unified_kernel[grid](
         q,

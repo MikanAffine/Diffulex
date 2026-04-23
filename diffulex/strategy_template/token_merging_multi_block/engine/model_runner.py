@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import torch
 from tqdm import tqdm
 
@@ -13,6 +16,178 @@ from diffulex.strategy_template.token_merging_multi_block.engine.request import 
 
 class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
     token_merge_renormalize = True
+
+    @staticmethod
+    def _debug_dump_dir() -> str | None:
+        return os.getenv("DIFFULEX_DEBUG_DUMP_DIR")
+
+    @staticmethod
+    def _debug_dump_include_qkv() -> bool:
+        return os.getenv("DIFFULEX_DEBUG_DUMP_QKV", "0") == "1"
+
+    @staticmethod
+    def _debug_dump_full_logits() -> bool:
+        return os.getenv("DIFFULEX_DEBUG_DUMP_FULL_LOGITS", "0") == "1"
+
+    def _debug_dump_enabled(self) -> bool:
+        return bool(self._debug_dump_dir())
+
+    def _set_model_debug_dump_enabled(self) -> None:
+        model = getattr(self.model, "model", None)
+        enable_fn = getattr(model, "enable_debug_dump", None)
+        if enable_fn is not None:
+            enable_fn(include_qkv=self._debug_dump_include_qkv())
+
+    def _clear_model_debug_dump(self) -> None:
+        model = getattr(self.model, "model", None)
+        disable_fn = getattr(model, "disable_debug_dump", None)
+        if disable_fn is not None:
+            disable_fn()
+
+    def _pop_model_debug_dump(self) -> dict[str, object] | None:
+        model = getattr(self.model, "model", None)
+        pop_fn = getattr(model, "pop_last_debug_dump", None)
+        if pop_fn is None:
+            return None
+        return pop_fn()
+
+    def _append_engine_debug_dump(
+        self,
+        reqs: list[TokenMergingMultiBlockReqTemplate],
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        logits: torch.Tensor,
+        sample_output,
+    ) -> None:
+        dump_dir = self._debug_dump_dir()
+        if not dump_dir or not self.is_model_parallel_root:
+            return
+
+        debug_capture = self._pop_model_debug_dump()
+        if debug_capture is None:
+            return
+
+        attn_metadata: TokenMergingMultiBlockAttnMetaDataTemplate = self.fetch_attn_metadata()
+        cu_seqlens_q = attn_metadata.cu_seqlens_q.detach().cpu()
+        full_logits = self._debug_dump_full_logits()
+        out_dir = Path(dump_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        token_merge_meta = None
+        if bool(attn_metadata.token_merge_enabled):
+            token_merge_meta = {
+                "merge_mask": attn_metadata.token_merge_mask.detach().cpu()
+                if attn_metadata.token_merge_mask is not None
+                else None,
+                "topk_ids": attn_metadata.token_merge_topk_ids.detach().cpu()
+                if attn_metadata.token_merge_topk_ids is not None
+                else None,
+                "topk_probs": attn_metadata.token_merge_topk_probs.detach().cpu()
+                if attn_metadata.token_merge_topk_probs is not None
+                else None,
+                "residual_probs": attn_metadata.token_merge_residual_probs.detach().cpu()
+                if attn_metadata.token_merge_residual_probs is not None
+                else None,
+                "mask_token_id": int(attn_metadata.token_merge_mask_token_id)
+                if attn_metadata.token_merge_mask_token_id is not None
+                else None,
+                "renormalize": bool(attn_metadata.token_merge_renormalize),
+                "mode": str(attn_metadata.token_merge_mode),
+                "weight": float(attn_metadata.token_merge_weight),
+            }
+
+        for req_idx, req in enumerate(reqs):
+            start = int(cu_seqlens_q[req_idx].item())
+            end = int(cu_seqlens_q[req_idx + 1].item())
+            req_num_tokens = end - start
+            req_logits = logits[start:end]
+            req_input_ids = input_ids[start:end]
+            req_positions = positions[start:end]
+            top_k = min(10, int(req_logits.shape[-1]))
+            topk_probs, topk_ids = torch.topk(torch.softmax(req_logits.float(), dim=-1), k=top_k, dim=-1)
+            record = {
+                "meta": {
+                    "req_id": int(req.req_id),
+                    "step_nfe": int(req.nfe) + 1,
+                    "req_status": getattr(req.status, "name", str(req.status)),
+                    "running_len": int(req.running_len),
+                    "chunk_size": int(req.chunk_size),
+                    "valid_len": int(req.valid_len),
+                    "is_prefilling": bool(req.is_prefilling),
+                    "rank": int(self.rank),
+                    "dp_rank": int(self.dp_rank),
+                },
+                "inputs": {
+                    "input_ids": req_input_ids.detach().cpu(),
+                    "positions": req_positions.detach().cpu(),
+                    "running_sequence": torch.tensor(list(req.running_sequence), dtype=torch.int64),
+                    "running_position_ids": torch.tensor(list(req.running_position_ids), dtype=torch.int64),
+                },
+                "blocks": [
+                    {
+                        "block_id": int(block.block_id),
+                        "start": int(block.start),
+                        "end": int(block.end),
+                        "status": getattr(block.status, "name", str(block.status)),
+                        "editable_start": int(getattr(block, "editable_start", 0) or 0),
+                        "token_ids": torch.tensor(block.token_ids, dtype=torch.int64),
+                    }
+                    for block in req.dllm_blocks
+                    if getattr(block, "is_active", False)
+                ],
+                "token_merge_metadata": None,
+                "hidden_states": {},
+                "logits": {
+                    "topk_ids": topk_ids.detach().cpu(),
+                    "topk_probs": topk_probs.detach().cpu(),
+                },
+                "sampler_trace": None,
+            }
+            if full_logits:
+                record["logits"]["full"] = req_logits.detach().cpu()
+
+            if token_merge_meta is not None:
+                req_token_merge = {}
+                for key, value in token_merge_meta.items():
+                    if isinstance(value, torch.Tensor):
+                        req_token_merge[key] = value[start:end]
+                    else:
+                        req_token_merge[key] = value
+                record["token_merge_metadata"] = req_token_merge
+
+            for key, value in debug_capture.items():
+                if isinstance(value, dict):
+                    nested = {}
+                    for nested_key, nested_value in value.items():
+                        if (
+                            torch.is_tensor(nested_value)
+                            and nested_value.ndim > 0
+                            and int(nested_value.shape[0]) == int(input_ids.shape[0])
+                        ):
+                            nested[nested_key] = nested_value[start:end].detach().cpu()
+                        else:
+                            nested[nested_key] = nested_value.detach().cpu()
+                    record["hidden_states"][key] = nested
+                else:
+                    if (
+                        torch.is_tensor(value)
+                        and value.ndim > 0
+                        and int(value.shape[0]) == int(input_ids.shape[0])
+                    ):
+                        record["hidden_states"][key] = value[start:end].detach().cpu()
+                    else:
+                        record["hidden_states"][key] = value.detach().cpu()
+
+            if sample_output is not None:
+                req_id_str = str(req.req_id)
+                record["sampler_trace"] = {
+                    "dmax_trace_map": dict(getattr(sample_output, "dmax_trace_map", {}).get(req_id_str, {})),
+                    "block_state_map": dict(getattr(sample_output, "block_state_map", {}).get(req_id_str, {})),
+                    "edit_writes_map": dict(getattr(sample_output, "edit_writes_map", {}).get(req_id_str, {})),
+                }
+
+            file_path = out_dir / f"req_{int(req.req_id)}_step_{int(req.nfe) + 1:03d}_rank_{int(self.rank)}.pt"
+            torch.save(record, file_path)
 
     def prepare_chunked_prefill_token_merging_multi_block(
         self: TokenMergingMultiBlockModelRunnerTemplate,
@@ -199,6 +374,7 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
         if (
             (attn_metadata.status_table == 0).any()
             or self.enforce_eager
+            or self._debug_dump_enabled()
             or input_ids.size(0) > 512 * (self.config.buffer_size * self.config.block_size)
         ):
             return self.model.compute_logits(self.model(input_ids, positions))
@@ -380,7 +556,16 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
 
         input_ids, positions = self.prepare_chunked_prefill_token_merging_multi_block(local_reqs)
         temperatures = self.prepare_sample(local_reqs) if self.is_model_parallel_root else None
-        logits = self.run_model_multi_block(input_ids, positions)
-        sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
+        debug_enabled = self._debug_dump_enabled()
+        if debug_enabled:
+            self._set_model_debug_dump_enabled()
+        try:
+            logits = self.run_model_multi_block(input_ids, positions)
+            sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
+            if debug_enabled:
+                self._append_engine_debug_dump(local_reqs, input_ids, positions, logits, sample_output)
+        finally:
+            if debug_enabled:
+                self._clear_model_debug_dump()
         self.reset_attn_metadata()
         return self.gather_dp_sample_output(sample_output)

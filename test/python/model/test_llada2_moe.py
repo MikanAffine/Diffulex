@@ -230,6 +230,55 @@ def test_llada2_token_merge_hook_supports_iter_smooth_mode(monkeypatch):
     assert torch.allclose(merged[1], hidden[1])
 
 
+def test_llada2_dmax_topk_token_merge_applies_renormalize(monkeypatch):
+    _mock_single_rank(monkeypatch)
+    from diffulex.attention.metadata import set_fetch_fn_for_attn_metadata
+    from diffulex.strategy.dmax.attention.metadata import DMaxAttnMetaData
+
+    model = LLaDA2Model(_make_config(num_hidden_layers=0, vocab_size=8, hidden_size=4))
+    with torch.no_grad():
+        model.word_embeddings.weight.copy_(
+            torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 2.0, 0.0],
+                    [0.0, 0.0, 0.0, 3.0],
+                    [4.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ]
+            )
+        )
+
+    metadata = DMaxAttnMetaData()
+    metadata.init_token_merging(
+        merge_mask=torch.tensor([True]),
+        topk_ids=torch.tensor([[2, 3]]),
+        topk_probs=torch.tensor([[0.25, 0.50]]),
+        residual_probs=torch.tensor([[0.25]]),
+        mask_token_id=4,
+        renormalize=True,
+        mode="dmax_topk",
+    )
+    set_fetch_fn_for_attn_metadata(lambda: metadata)
+
+    hidden = model.word_embeddings(torch.tensor([0]))
+    merged = model._maybe_apply_token_merging(hidden)
+
+    blended = (
+        0.25 * model.word_embeddings.weight[2]
+        + 0.50 * model.word_embeddings.weight[3]
+        + 0.25 * model.word_embeddings.weight[4]
+    )
+    target_norm = 0.25 * model.word_embeddings.weight[2].norm()
+    target_norm = target_norm + 0.50 * model.word_embeddings.weight[3].norm()
+    target_norm = target_norm + 0.25 * model.word_embeddings.weight[4].norm()
+    expected = blended * (target_norm / blended.norm())
+    assert torch.allclose(merged[0], expected)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize(
     ("num_experts", "top_k", "n_group", "topk_group"),
