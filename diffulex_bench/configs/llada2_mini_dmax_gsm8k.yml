@@ -17,7 +17,7 @@ engine:
   gpu_memory_utilization: 0.5
   max_model_len: 2048
   max_num_batched_tokens: 4096
-  max_num_reqs: 1
+  max_num_reqs: 128
 
   enforce_eager: true
   enable_prefix_caching: true
@@ -40,7 +40,7 @@ engine:
 eval:
   dataset_name: "gsm8k_diffulex_dmax_chat"
   dataset_split: "test"
-  dataset_limit: 100
+  dataset_limit: null
   temperature: 0.0
   max_tokens: 256
   output_dir: "benchmark_results/llada2_mini_dmax_gsm8k_tp1"
