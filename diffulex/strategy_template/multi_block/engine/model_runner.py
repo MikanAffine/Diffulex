@@ -17,6 +17,7 @@ from diffulex.engine.request import AutoReq, DllmReq
 from diffulex.engine.status import DllmReqStatus
 from diffulex.engine.model_runner import ModelRunnerBase
 from diffulex.logger import get_logger
+from diffulex.vllm_compat import vllm_graph_capture
 
 logger = get_logger(__name__)
 
@@ -147,8 +148,9 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
 
             torch.cuda.synchronize()
             self._graph_capture_barrier()
-            with torch.cuda.graph(graph, pool=pool, stream=stream):
-                run_once()
+            with vllm_graph_capture(stream, pool) as capture_stream:
+                with torch.cuda.graph(graph, pool=pool, stream=capture_stream):
+                    run_once()
             stream.synchronize()
         return graph
 

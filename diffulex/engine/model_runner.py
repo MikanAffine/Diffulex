@@ -18,6 +18,7 @@ from diffulex.attention.metadata import set_warming_up, reset_warming_up
 from diffulex.model import AutoModelForDiffusionLM
 from diffulex.engine.strategy_registry import DiffulexStrategyRegistry
 from diffulex.logger import get_logger
+from diffulex.vllm_compat import reset_vllm_compat_state, vllm_current_config
 
 
 logger = get_logger(__name__)
@@ -100,7 +101,8 @@ class ModelRunnerBase(
         torch.set_default_dtype(self.default_dtype)
         torch.set_default_device(f"cuda:{device_id}")
 
-        self.model = self.load_model(config)
+        with vllm_current_config(config):
+            self.model = self.load_model(config)
         self.sampler = self.load_sampler(config)
         self.allocate_kv_cache()
         self.warmup_model()
@@ -146,6 +148,7 @@ class ModelRunnerBase(
                 dist.destroy_process_group()
         except Exception:
             logger.debug("Failed to destroy process group on rank %s.", self.rank, exc_info=True)
+        reset_vllm_compat_state()
         reset_parallel_state()
 
     def start_worker_loop(self):

@@ -6,49 +6,11 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from diffulex.distributed.parallel_state import fetch_parallel_state
-
-_VLLM_TP_GROUP = None
-_VLLM_TP_GROUP_FAILED = False
-
-
-def _tp_group_ranks_for_vllm() -> list[list[int]]:
-    state = fetch_parallel_state()
-    tp_size = int(state.tp_size)
-    if tp_size <= 1:
-        return [[int(state.global_rank)]]
-    dp_size = int(state.dp_size)
-    return [
-        list(range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
-        for dp_rank in range(dp_size)
-    ]
-
-
-def _get_vllm_tp_group():
-    global _VLLM_TP_GROUP, _VLLM_TP_GROUP_FAILED
-    if _VLLM_TP_GROUP is not None:
-        return _VLLM_TP_GROUP
-    if _VLLM_TP_GROUP_FAILED:
-        return None
-
-    try:
-        from vllm.distributed.parallel_state import GroupCoordinator, set_custom_all_reduce
-
-        set_custom_all_reduce(True)
-        _VLLM_TP_GROUP = GroupCoordinator(
-            group_ranks=_tp_group_ranks_for_vllm(),
-            local_rank=int(torch.cuda.current_device()),
-            torch_distributed_backend=dist.get_backend(),
-            use_device_communicator=True,
-            group_name="tp",
-        )
-        return _VLLM_TP_GROUP
-    except Exception:
-        _VLLM_TP_GROUP_FAILED = True
-        return None
+from diffulex.vllm_compat import get_vllm_tp_group
 
 
 def tp_all_reduce(x: torch.Tensor, group) -> torch.Tensor:
-    vllm_tp_group = _get_vllm_tp_group()
+    vllm_tp_group = get_vllm_tp_group()
     if vllm_tp_group is not None:
         return vllm_tp_group.all_reduce(x)
     dist.all_reduce(x, group=group)
