@@ -23,6 +23,56 @@ except ImportError:
 
 logger = init_logger(__name__)
 
+_FUSED_MOE_WORKSPACE_CACHE: Dict[Tuple, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_fused_moe_workspace(
+    *,
+    hidden_states: torch.Tensor,
+    m: int,
+    top_k: int,
+    intermediate_size_times_2: int,
+    hidden_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return long-lived workspaces for CUDA graph capture/replay.
+
+    vLLM's fused MoE allocates intermediate tensors inside the forward call. In
+    eager mode that is fine, but CUDA graph replay needs captured tensor
+    addresses to remain valid. Keeping the workspace tensors in a module-level
+    cache mirrors vLLM's static-buffer usage in graph mode and avoids replaying
+    kernels against allocator-reclaimed temporary buffers.
+    """
+    key = (
+        hidden_states.device.type,
+        hidden_states.device.index,
+        hidden_states.dtype,
+        int(m),
+        int(top_k),
+        int(intermediate_size_times_2),
+        int(hidden_size),
+    )
+    workspace = _FUSED_MOE_WORKSPACE_CACHE.get(key)
+    if workspace is None:
+        workspace = (
+            torch.empty(
+                (m, top_k, intermediate_size_times_2),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            ),
+            torch.empty(
+                (m * top_k, intermediate_size_times_2 // 2),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            ),
+            torch.empty(
+                (m, top_k, hidden_size),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            ),
+        )
+        _FUSED_MOE_WORKSPACE_CACHE[key] = workspace
+    return workspace
+
 
 @triton.jit
 def fused_moe_kernel_gptq_awq(
@@ -1178,15 +1228,15 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     config = get_config_func(M)
 
-    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
-    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
-    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
+    intermediate_cache1, intermediate_cache2, intermediate_cache3 = (
+        _get_fused_moe_workspace(
+            hidden_states=hidden_states,
+            m=M,
+            top_k=topk_ids.shape[1],
+            intermediate_size_times_2=N,
+            hidden_size=w2.shape[1],
+        )
+    )
 
     if hidden_states.dtype == torch.bfloat16:
         compute_type = tl.bfloat16
