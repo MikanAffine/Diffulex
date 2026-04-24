@@ -54,16 +54,16 @@ class Attention(nn.Module):
         mask: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         if q.dim() == 2:
-            q = rearrange(q, "s (nh hd) -> s nh hd", **self.q_shape).contiguous()
+            q = rearrange(q, "s (nh hd) -> s nh hd", **self.q_shape)
         elif q.dim() == 3:
-            q = q.contiguous()
+            q = q
         else:
             raise ValueError(f"Unsupported q ndim for Attention: {q.dim()}")
 
         if k.dim() == 2:
-            k = rearrange(k, "s (nkvh hd) -> s nkvh hd", **self.kv_shape).contiguous()
+            k = rearrange(k, "s (nkvh hd) -> s nkvh hd", **self.kv_shape)
         elif k.dim() == 3:
-            k = k.contiguous()
+            k = k
         else:
             raise ValueError(f"Unsupported k ndim for Attention: {k.dim()}")
 
