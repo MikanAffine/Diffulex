@@ -456,6 +456,8 @@ def load_config_from_args(args) -> BenchmarkConfig:
             config.engine.max_num_batched_tokens = args.max_num_batched_tokens
         if getattr(args, "enable_prefill_cudagraph", None) is not None:
             config.engine.enable_prefill_cudagraph = bool(args.enable_prefill_cudagraph)
+        if getattr(args, "enable_full_static_runner", None) is not None:
+            config.engine.enable_full_static_runner = bool(args.enable_full_static_runner)
         if (
             was_provided("prefill_cudagraph_max_len")
             and getattr(args, "prefill_cudagraph_max_len", None) is not None
@@ -525,6 +527,11 @@ def load_config_from_args(args) -> BenchmarkConfig:
             enable_prefill_cudagraph=(
                 bool(getattr(args, "enable_prefill_cudagraph", True))
                 if getattr(args, "enable_prefill_cudagraph", None) is not None
+                else True
+            ),
+            enable_full_static_runner=(
+                bool(getattr(args, "enable_full_static_runner", True))
+                if getattr(args, "enable_full_static_runner", None) is not None
                 else True
             ),
             prefill_cudagraph_max_len=(getattr(args, "prefill_cudagraph_max_len", None) or 0),

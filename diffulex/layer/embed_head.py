@@ -6,10 +6,35 @@ import torch.distributed as dist
 import os
 
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.vllm_compat import get_vllm_tp_group
 
 
 LM_HEAD_FP32 = os.environ.get("DIFFULEX_LM_HEAD_FP32", "0") == "1"
 LM_HEAD_FP32_GATHER = LM_HEAD_FP32 or os.environ.get("DIFFULEX_LM_HEAD_FP32_GATHER", "0") == "1"
+
+
+def _tp_all_reduce(x: torch.Tensor, group) -> torch.Tensor:
+    vllm_tp_group = get_vllm_tp_group()
+    if vllm_tp_group is not None:
+        try:
+            return vllm_tp_group.all_reduce(x)
+        except Exception:
+            pass
+    dist.all_reduce(x, group=group)
+    return x
+
+
+def _tp_gather_to_rank0(x: torch.Tensor, group, tp_size: int, tp_rank: int) -> torch.Tensor | None:
+    vllm_tp_group = get_vllm_tp_group()
+    if vllm_tp_group is not None:
+        try:
+            return vllm_tp_group.gather(x, dst=0, dim=-1)
+        except Exception:
+            pass
+
+    gathered = [torch.empty_like(x) for _ in range(tp_size)]
+    dist.all_gather(gathered, x, group=group)
+    return torch.cat(gathered, -1) if tp_rank == 0 else None
 
 
 class VocabParallelEmbedding(nn.Module):
@@ -46,7 +71,7 @@ class VocabParallelEmbedding(nn.Module):
         y = F.embedding(x, self.weight)
         if self.tp_size > 1:
             y = mask.unsqueeze(1) * y
-            dist.all_reduce(y, group=self.tp_group)
+            y = _tp_all_reduce(y, self.tp_group)
         return y
 
 
@@ -63,24 +88,45 @@ class ParallelLMHead(VocabParallelEmbedding):
             self.bias.weight_loader = self.weight_loader
         else:
             self.register_parameter("bias", None)
+        self._local_logits_workspace: torch.Tensor | None = None
 
-    def forward(self, x: torch.Tensor):
+    def _get_local_logits_workspace(self, x: torch.Tensor) -> torch.Tensor:
+        shape = (*x.shape[:-1], self.num_embeddings_per_partition)
+        workspace = self._local_logits_workspace
+        if (
+            workspace is None
+            or tuple(workspace.shape) != tuple(shape)
+            or workspace.device != x.device
+            or workspace.dtype != x.dtype
+        ):
+            workspace = torch.empty(shape, device=x.device, dtype=x.dtype)
+            self._local_logits_workspace = workspace
+        return workspace
+
+    def _linear_into_workspace(self, x: torch.Tensor) -> torch.Tensor:
         if LM_HEAD_FP32:
-            logits = F.linear(
+            return F.linear(
                 x.to(torch.float32),
                 self.weight.to(torch.float32),
                 self.bias.to(torch.float32) if self.bias is not None else None,
             ).to(x.dtype)
-        else:
-            logits = F.linear(x, self.weight, self.bias)
+
+        if x.dim() != 2:
+            return F.linear(x, self.weight, self.bias)
+
+        logits = self._get_local_logits_workspace(x)
+        torch.mm(x, self.weight.t(), out=logits)
+        if self.bias is not None:
+            logits.add_(self.bias)
+        return logits
+
+    def forward(self, x: torch.Tensor):
+        logits = self._linear_into_workspace(x)
         if self.tp_size > 1:
             if LM_HEAD_FP32_GATHER:
-                gather_input = logits.to(torch.float32)
-                gathered_logits = [torch.empty_like(gather_input) for _ in range(self.tp_size)]
-                dist.all_gather(gathered_logits, gather_input, group=self.tp_group)
-                logits = torch.cat(gathered_logits, -1).to(logits.dtype) if self.tp_rank == 0 else None
+                logits_dtype = logits.dtype
+                logits = _tp_gather_to_rank0(logits.to(torch.float32), self.tp_group, self.tp_size, self.tp_rank)
+                logits = logits.to(logits_dtype) if logits is not None else None
             else:
-                gathered_logits = [torch.empty_like(logits) for _ in range(self.tp_size)]
-                dist.all_gather(gathered_logits, logits, group=self.tp_group)
-                logits = torch.cat(gathered_logits, -1) if self.tp_rank == 0 else None
+                logits = _tp_gather_to_rank0(logits, self.tp_group, self.tp_size, self.tp_rank)
         return logits

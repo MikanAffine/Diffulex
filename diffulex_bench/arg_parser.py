@@ -416,6 +416,12 @@ Examples:
         help="Enable lazy CUDA graph capture for block-aligned prefill buckets",
     )
     parser.add_argument(
+        "--enable-full-static-runner",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use the full-static CUDA graph runner for supported multi-block forward passes",
+    )
+    parser.add_argument(
         "--prefill-cudagraph-max-len",
         type=int,
         default=None,

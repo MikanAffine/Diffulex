@@ -66,6 +66,42 @@ class LLaDA2DMaxSampler(TokenMergeSamplerMixin, LLaDA2dot1Sampler):
         del block, confidence, initial_confidence, kwargs
         return torch.empty(0, dtype=torch.long, device=sampled_tokens.device)
 
+    def forward(
+        self,
+        reqs,
+        logits: torch.Tensor,
+        temperatures: torch.Tensor,
+        top_p=None,
+        top_k=None,
+        margin_confidence=False,
+        neg_entropy=False,
+        **kwargs,
+    ):
+        # DMax derives writes/token-merge state from full block logits in
+        # _build_edit_writes_map. Running the generic mask-token sampler first
+        # duplicates argmax/softmax work and its accepted-id output is unused.
+        del top_p, top_k, margin_confidence, neg_entropy
+        attn_metadata = self.fetch_attn_metadata()
+        split_logits = self._split_logits_per_req(attn_metadata, reqs, logits)
+
+        empty_per_req = {str(req.req_id): {} for req in reqs}
+        sample_output = self.output_cls(
+            true_local_ids_map=dict(empty_per_req),
+            accepted_ids_map=dict(empty_per_req),
+            sampled_tokens_map=dict(empty_per_req),
+            mask_token_rel_ids_map=dict(empty_per_req),
+            confidence_map=dict(empty_per_req),
+            initial_confidence_map=dict(empty_per_req),
+        )
+        return self._postprocess_sample_output(
+            reqs=reqs,
+            split_logits=split_logits,
+            temperatures=temperatures,
+            sample_output=sample_output,
+            attn_metadata=attn_metadata,
+            **kwargs,
+        )
+
     @staticmethod
     def _sample_argmax(logits: torch.Tensor, temperature: float) -> torch.Tensor:
         if temperature > 0:

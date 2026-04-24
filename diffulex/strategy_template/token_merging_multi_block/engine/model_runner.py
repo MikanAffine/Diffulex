@@ -14,6 +14,32 @@ from diffulex.strategy_template.token_merging_multi_block.engine.request import 
 class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
     token_merge_renormalize = True
 
+    def _ensure_runtime_token_merge_buffers(
+        self,
+        *,
+        token_capacity: int,
+        top_k_capacity: int,
+    ) -> dict[str, torch.Tensor]:
+        device = self._cuda_graph_device()
+        token_capacity = max(1, int(token_capacity), int(self.config.max_num_batched_tokens))
+        top_k_capacity = max(1, int(top_k_capacity), int(self.config.token_merge_top_k))
+        buffers = getattr(self, "_runtime_token_merge_buffers", None)
+        if buffers is not None:
+            if (
+                int(buffers["merge_mask"].numel()) >= token_capacity
+                and int(buffers["topk_ids"].size(1)) >= top_k_capacity
+            ):
+                return buffers
+
+        buffers = {
+            "merge_mask": torch.empty(token_capacity, dtype=torch.bool, device=device),
+            "topk_ids": torch.empty(token_capacity, top_k_capacity, dtype=torch.int64, device=device),
+            "topk_probs": torch.empty(token_capacity, top_k_capacity, dtype=torch.float32, device=device),
+            "residual_probs": torch.empty(token_capacity, 1, dtype=torch.float32, device=device),
+        }
+        self._runtime_token_merge_buffers = buffers
+        return buffers
+
     def prepare_chunked_prefill_token_merging_multi_block(
         self: TokenMergingMultiBlockModelRunnerTemplate,
         reqs: list[TokenMergingMultiBlockReqTemplate],
@@ -55,25 +81,31 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
             attn_metadata.init_token_merging(mask_token_id=self.config.mask_token_id)
             return
 
-        device = positions.device
-        merge_mask = torch.zeros(num_tokens, dtype=torch.bool, device=device)
-        topk_ids = torch.full(
-            (num_tokens, max_top_k),
-            int(self.config.mask_token_id),
-            dtype=torch.int64,
-            device=device,
-        )
-        topk_probs = torch.zeros((num_tokens, max_top_k), dtype=torch.float32, device=device)
-        residual_probs = torch.zeros((num_tokens, 1), dtype=torch.float32, device=device)
+        buffers = self._ensure_runtime_token_merge_buffers(token_capacity=num_tokens, top_k_capacity=max_top_k)
+        merge_mask = buffers["merge_mask"][:num_tokens]
+        topk_ids = buffers["topk_ids"][:num_tokens, :max_top_k]
+        topk_probs = buffers["topk_probs"][:num_tokens, :max_top_k]
+        residual_probs = buffers["residual_probs"][:num_tokens]
+
+        mask_token_id = int(self.config.mask_token_id)
+        merge_mask_rows = [False] * num_tokens
+        topk_id_rows = [[mask_token_id] * max_top_k for _ in range(num_tokens)]
+        topk_prob_rows = [[0.0] * max_top_k for _ in range(num_tokens)]
+        residual_prob_rows = [[0.0] for _ in range(num_tokens)]
 
         for idx, descriptor in enumerate(descriptors):
             if descriptor is None:
                 continue
             k = len(descriptor.topk_ids)
-            merge_mask[idx] = True
-            topk_ids[idx, :k] = torch.tensor(descriptor.topk_ids, dtype=torch.int64, device=device)
-            topk_probs[idx, :k] = torch.tensor(descriptor.topk_probs, dtype=torch.float32, device=device)
-            residual_probs[idx, 0] = float(descriptor.residual_prob)
+            merge_mask_rows[idx] = True
+            topk_id_rows[idx][:k] = descriptor.topk_ids
+            topk_prob_rows[idx][:k] = descriptor.topk_probs
+            residual_prob_rows[idx][0] = float(descriptor.residual_prob)
+
+        merge_mask.copy_(self._cpu_tensor(merge_mask_rows, torch.bool), non_blocking=True)
+        topk_ids.copy_(self._cpu_tensor(topk_id_rows, torch.int64), non_blocking=True)
+        topk_probs.copy_(self._cpu_tensor(topk_prob_rows, torch.float32), non_blocking=True)
+        residual_probs.copy_(self._cpu_tensor(residual_prob_rows, torch.float32), non_blocking=True)
 
         attn_metadata.init_token_merging(
             merge_mask=merge_mask,
@@ -298,53 +330,25 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
         positions: torch.Tensor,
     ):
         attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
+        full_runner = self._full_static_runner()
 
         if (attn_metadata.status_table == 0).any():
-            if self._can_use_prefill_graph(attn_metadata, int(input_ids.size(0))):
-                return self._run_prefill_cudagraph(input_ids, positions, attn_metadata)
+            if full_runner.can_run_prefill(attn_metadata, int(input_ids.size(0))):
+                return full_runner.run_prefill(input_ids, positions, attn_metadata)
             return self.model.compute_logits(self.model(input_ids, positions))
 
-        if (
-            self.enforce_eager
-            or input_ids.size(0) > 512 * (self.config.buffer_size * self.config.block_size)
-        ):
+        if not full_runner.can_run_decode(input_ids):
             return self.model.compute_logits(self.model(input_ids, positions))
 
-        num_tokens = input_ids.size(0)
-        captured_num_tokens = next(x for x in self.graph_bs if x >= num_tokens)
-        captured_num_seqs = captured_num_tokens // (self.config.block_size * self.config.buffer_size)
-        graph = self.graphs[captured_num_tokens]
-        graph_vars = self.graph_vars
-        graph_capacity = int(graph_vars["context_lens"].size(0))
-        if captured_num_seqs > graph_capacity:
-            raise RuntimeError(
-                "Captured CUDA graph batch size exceeds allocated graph buffer capacity: "
-                f"captured_num_seqs={captured_num_seqs}, graph_capacity={graph_capacity}, "
-                f"captured_num_tokens={captured_num_tokens}, num_tokens={num_tokens}, "
-                f"max_num_reqs={self.config.max_num_reqs}, block_size={self.config.block_size}, "
-                f"buffer_size={self.config.buffer_size}"
-            )
+        return full_runner.run_decode(input_ids, positions, attn_metadata)
 
-        num_reqs = attn_metadata.num_reqs
-        self._copy_common_graph_inputs(graph_vars, attn_metadata, input_ids, positions, num_tokens, num_reqs)
-
-        for i in range(num_reqs, captured_num_seqs):
-            graph_vars["cu_seqlens_q"][i + 1] = graph_vars["cu_seqlens_q"][i]
-            graph_vars["cu_seqlens_k"][i + 1] = graph_vars["cu_seqlens_k"][i]
-
-        attn_metadata.slot_mapping = graph_vars["slot_mapping"]
-        attn_metadata.context_lens = graph_vars["context_lens"]
-        attn_metadata.cu_seqlens_q = graph_vars["cu_seqlens_q"]
-        attn_metadata.cu_seqlens_k = graph_vars["cu_seqlens_k"]
-        attn_metadata.valid_slices = graph_vars["valid_slices"]
-        attn_metadata.status_table = graph_vars["status_table"]
-        attn_metadata.prefix_lens = graph_vars["prefix_lens"]
-        attn_metadata.padded_prefix_lens = graph_vars["padded_prefix_lens"]
-        attn_metadata.page_tables = graph_vars["page_tables"]
+    def _bind_decode_graph_extra_metadata(
+        self: TokenMergingMultiBlockModelRunnerTemplate,
+        attn_metadata: TokenMergingMultiBlockAttnMetaDataTemplate,
+        graph_vars: dict[str, torch.Tensor],
+        num_tokens: int,
+    ) -> None:
         self._bind_graph_token_merge_metadata(attn_metadata, graph_vars, num_tokens)
-
-        graph.replay()
-        return self.model.compute_logits(graph_vars["outputs"][:num_tokens])
 
     @torch.inference_mode()
     def capture_cudagraph_token_merging_multi_block(self: TokenMergingMultiBlockModelRunnerTemplate):
@@ -382,7 +386,7 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
             device=device,
         )
         token_merge_residual_probs = torch.zeros((max_num_tokens, 1), dtype=torch.float32, device=device)
-        outputs = torch.zeros(max_num_tokens, hf_config.hidden_size, device=device)
+        outputs = torch.zeros(max_num_tokens, hf_config.hidden_size, dtype=self._model_hidden_dtype(), device=device)
 
         cu_seqlens_q = torch.zeros(max_num_seqs + 1, dtype=torch.int32, device=device)
         for i in range(max_num_seqs + 1):

@@ -127,6 +127,7 @@ class EngineConfig:
     max_num_batched_tokens: int = 4096
     max_num_reqs: int = 128
     enable_prefill_cudagraph: bool = True
+    enable_full_static_runner: bool = True
     prefill_cudagraph_max_len: int = 0
     enable_torch_compile: bool = True
     enable_cudagraph_torch_compile: bool = False

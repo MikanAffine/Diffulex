@@ -3,6 +3,7 @@
 import functools
 import json
 import os
+import glob
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -846,14 +847,52 @@ def get_moe_configs(
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
 
-    config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
+    local_config_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "configs")
+    config_file_path = os.path.join(local_config_dir, json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info("Using configuration from %s for MoE layer.",
                         config_file_path)
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
+
+    try:
+        import vllm.model_executor.layers.fused_moe as vllm_fused_moe
+
+        vllm_config_file_path = os.path.join(
+            os.path.dirname(os.path.realpath(vllm_fused_moe.__file__)),
+            "configs",
+            json_file_name,
+        )
+        if os.path.exists(vllm_config_file_path):
+            with open(vllm_config_file_path) as f:
+                logger.info("Using vLLM configuration from %s for MoE layer.",
+                            vllm_config_file_path)
+                return {int(key): val for key, val in json.load(f).items()}
+
+        # vLLM config filenames are sometimes keyed by a slightly different
+        # marketing name for the same accelerator family. Use this only when
+        # it is unambiguous for E/N/dtype/block_shape.
+        prefix = json_file_name.split("device_name=", 1)[0]
+        suffix = ""
+        if ",dtype=" in json_file_name:
+            suffix = ",dtype=" + json_file_name.split(",dtype=", 1)[1]
+        elif ",block_shape=" in json_file_name:
+            suffix = ",block_shape=" + json_file_name.split(",block_shape=", 1)[1]
+        candidates = glob.glob(
+            os.path.join(
+                os.path.dirname(os.path.realpath(vllm_fused_moe.__file__)),
+                "configs",
+                f"{prefix}device_name=NVIDIA_H100*{suffix}",
+            )
+        )
+        if len(candidates) == 1:
+            with open(candidates[0]) as f:
+                logger.info("Using compatible vLLM MoE configuration from %s.",
+                            candidates[0])
+                return {int(key): val for key, val in json.load(f).items()}
+    except Exception:
+        logger.debug("Failed to look up vLLM MoE config fallback.", exc_info=True)
 
     # If no optimized configuration is available, we will use the default
     # configuration

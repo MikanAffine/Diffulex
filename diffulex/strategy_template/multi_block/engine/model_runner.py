@@ -17,6 +17,7 @@ from diffulex.engine.request import AutoReq, DllmReq
 from diffulex.engine.status import DllmReqStatus
 from diffulex.engine.model_runner import ModelRunnerBase
 from diffulex.logger import get_logger
+from diffulex.strategy_template.multi_block.engine.full_static_runner import FullStaticRunner
 from diffulex.vllm_compat import vllm_graph_capture
 
 logger = get_logger(__name__)
@@ -35,6 +36,13 @@ def _freeze_gc_for_cudagraph():
 
 
 class MultiBlockModelRunnerTemplate(ModelRunnerBase):
+    def _full_static_runner(self) -> FullStaticRunner:
+        runner = getattr(self, "full_static_runner", None)
+        if runner is None:
+            runner = FullStaticRunner(self)
+            self.full_static_runner = runner
+        return runner
+
     @staticmethod
     def _round_up_to_multiple(value: int, multiple: int) -> int:
         return ((value + multiple - 1) // multiple) * multiple
@@ -277,6 +285,88 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
     def _cuda_graph_device() -> torch.device:
         return torch.device(f"cuda:{torch.cuda.current_device()}")
 
+    def _model_hidden_dtype(self) -> torch.dtype:
+        try:
+            return next(self.model.parameters()).dtype
+        except StopIteration:
+            return torch.get_default_dtype()
+
+    def _ensure_runtime_static_buffers(
+        self,
+        *,
+        token_capacity: int,
+        req_capacity: int,
+        page_capacity: int,
+    ) -> dict[str, torch.Tensor]:
+        device = self._cuda_graph_device()
+        token_capacity = max(1, int(token_capacity), int(self.config.max_num_batched_tokens))
+        req_capacity = max(1, int(req_capacity), int(self.config.max_num_reqs) + 1)
+        page_capacity = max(
+            1,
+            int(page_capacity),
+            (int(self.config.max_model_len) + self.page_size - 1) // self.page_size,
+        )
+
+        buffers = getattr(self, "_runtime_static_buffers", None)
+        if buffers is not None:
+            if (
+                int(buffers["input_ids"].numel()) >= token_capacity
+                and int(buffers["context_lens"].numel()) >= req_capacity
+                and int(buffers["page_tables"].size(1)) >= page_capacity
+            ):
+                return buffers
+
+        buffers = {
+            "input_ids": torch.empty(token_capacity, dtype=torch.int64, device=device),
+            "positions": torch.empty(token_capacity, dtype=torch.int64, device=device),
+            "slot_mapping": torch.empty(token_capacity, dtype=torch.int32, device=device),
+            "context_lens": torch.empty(req_capacity, dtype=torch.int32, device=device),
+            "cu_seqlens_q": torch.empty(req_capacity + 1, dtype=torch.int32, device=device),
+            "cu_seqlens_k": torch.empty(req_capacity + 1, dtype=torch.int32, device=device),
+            "valid_slices": torch.empty(req_capacity, dtype=torch.int32, device=device),
+            "status_table": torch.empty(req_capacity, dtype=torch.int32, device=device),
+            "prefix_lens": torch.empty(req_capacity, dtype=torch.int32, device=device),
+            "padded_prefix_lens": torch.empty(req_capacity, dtype=torch.int32, device=device),
+            "page_tables": torch.empty(req_capacity, page_capacity, dtype=torch.int32, device=device),
+        }
+        self._runtime_static_buffers = buffers
+        return buffers
+
+    @staticmethod
+    def _cpu_tensor(values, dtype: torch.dtype) -> torch.Tensor:
+        tensor = torch.tensor(values, dtype=dtype, device="cpu")
+        if tensor.numel() > 0 and torch.cuda.is_available():
+            tensor = tensor.pin_memory()
+        return tensor
+
+    def _copy_1d_to_runtime_static(
+        self,
+        buffers: dict[str, torch.Tensor],
+        name: str,
+        values,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        length = len(values)
+        dst = buffers[name][:length]
+        if length:
+            dst.copy_(self._cpu_tensor(values, dtype), non_blocking=True)
+        return dst
+
+    def _prepare_static_page_tables(
+        self,
+        buffers: dict[str, torch.Tensor],
+        reqs: list[DllmReq],
+    ) -> torch.Tensor:
+        if not reqs:
+            return buffers["page_tables"][:0, :1]
+
+        max_len = max(1, max(len(req.page_table) for req in reqs))
+        page_tables = buffers["page_tables"][: len(reqs), :max_len]
+        page_tables.fill_(-1)
+        rows = [req.page_table + [-1] * (max_len - len(req.page_table)) for req in reqs]
+        page_tables.copy_(self._cpu_tensor(rows, torch.int32), non_blocking=True)
+        return page_tables
+
     def _can_use_prefill_graph(self, attn_metadata: AttnMetaDataBase, num_tokens: int) -> bool:
         if self.enforce_eager or not bool(getattr(self.config, "enable_prefill_cudagraph", True)):
             return False
@@ -311,6 +401,14 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         bucket_len: int,
         runtime_num_tokens: int,
         source_attn_metadata: AttnMetaDataBase | None = None,
+    ) -> None:
+        return None
+
+    def _bind_decode_graph_extra_metadata(
+        self,
+        attn_metadata: AttnMetaDataBase,
+        graph_vars: dict[str, torch.Tensor],
+        num_tokens: int,
     ) -> None:
         return None
 
@@ -366,7 +464,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         status_table = torch.zeros(req_capacity, dtype=torch.int32, device=device)
         prefix_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
         padded_prefix_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
-        outputs = torch.zeros(bucket_len, hf_config.hidden_size, device=device)
+        outputs = torch.zeros(bucket_len, hf_config.hidden_size, dtype=self._model_hidden_dtype(), device=device)
 
         cu_seqlens = torch.full((req_capacity + 1,), bucket_len, dtype=torch.int32, device=device)
         cu_seqlens[0] = 0
@@ -527,18 +625,27 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
             valid_slices.append(cu_seqlens_q[-2] + prepared["valid_slice"])
             slot_mapping.extend(prepared["slot_mapping"])
 
-        page_tables = self.prepare_page_tables(reqs)
-        input_ids_tensor = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions_tensor = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        context_lens_tensor = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_q_tensor = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_k_tensor = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping_tensor = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        valid_slices_tensor = torch.tensor(valid_slices, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        status_table_tensor = torch.tensor(status_table, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        prefix_lens_tensor = torch.tensor(prefix_lens_list, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        padded_prefix_lens_tensor = torch.tensor(padded_prefix_lens_list, dtype=torch.int32, pin_memory=True).cuda(
-            non_blocking=True
+        max_page_len = max((len(req.page_table) for req in reqs), default=1)
+        buffers = self._ensure_runtime_static_buffers(
+            token_capacity=len(input_ids),
+            req_capacity=len(reqs),
+            page_capacity=max_page_len,
+        )
+        page_tables = self._prepare_static_page_tables(buffers, reqs)
+        input_ids_tensor = self._copy_1d_to_runtime_static(buffers, "input_ids", input_ids, torch.int64)
+        positions_tensor = self._copy_1d_to_runtime_static(buffers, "positions", positions, torch.int64)
+        context_lens_tensor = self._copy_1d_to_runtime_static(buffers, "context_lens", context_lens, torch.int32)
+        cu_seqlens_q_tensor = self._copy_1d_to_runtime_static(buffers, "cu_seqlens_q", cu_seqlens_q, torch.int32)
+        cu_seqlens_k_tensor = self._copy_1d_to_runtime_static(buffers, "cu_seqlens_k", cu_seqlens_k, torch.int32)
+        slot_mapping_tensor = self._copy_1d_to_runtime_static(buffers, "slot_mapping", slot_mapping, torch.int32)
+        valid_slices_tensor = self._copy_1d_to_runtime_static(buffers, "valid_slices", valid_slices, torch.int32)
+        status_table_tensor = self._copy_1d_to_runtime_static(buffers, "status_table", status_table, torch.int32)
+        prefix_lens_tensor = self._copy_1d_to_runtime_static(buffers, "prefix_lens", prefix_lens_list, torch.int32)
+        padded_prefix_lens_tensor = self._copy_1d_to_runtime_static(
+            buffers,
+            "padded_prefix_lens",
+            padded_prefix_lens_list,
+            torch.int32,
         )
 
         self.set_attn_metadata(
@@ -566,11 +673,13 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         return input_ids_tensor, positions_tensor
 
     def prepare_idle_multi_block(self: ModelRunnerBase):
-        input_ids_tensor = torch.empty((0,), dtype=torch.int64).cuda(non_blocking=True)
-        positions_tensor = torch.empty((0,), dtype=torch.int64).cuda(non_blocking=True)
-        cu_seqlens_tensor = torch.zeros((1,), dtype=torch.int32).cuda(non_blocking=True)
-        empty_i32 = torch.empty((0,), dtype=torch.int32).cuda(non_blocking=True)
-        page_tables = torch.empty((0, 1), dtype=torch.int32).cuda(non_blocking=True)
+        buffers = self._ensure_runtime_static_buffers(token_capacity=1, req_capacity=1, page_capacity=1)
+        input_ids_tensor = buffers["input_ids"][:0]
+        positions_tensor = buffers["positions"][:0]
+        cu_seqlens_tensor = buffers["cu_seqlens_q"][:1]
+        cu_seqlens_tensor.zero_()
+        empty_i32 = buffers["slot_mapping"][:0]
+        page_tables = buffers["page_tables"][:0, :1]
 
         self.set_attn_metadata(
             is_prefill=[],
@@ -613,58 +722,16 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         positions: torch.Tensor,
     ):
         attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
+        full_runner = self._full_static_runner()
 
         if (attn_metadata.status_table == 0).any():
-            if self._can_use_prefill_graph(attn_metadata, int(input_ids.size(0))):
-                return self._run_prefill_cudagraph(input_ids, positions, attn_metadata)
+            if full_runner.can_run_prefill(attn_metadata, int(input_ids.size(0))):
+                return full_runner.run_prefill(input_ids, positions, attn_metadata)
             return self.model.compute_logits(self.model(input_ids, positions))
 
-        if (
-            self.enforce_eager
-            or input_ids.size(0) > 512 * (self.config.buffer_size * self.config.block_size)
-        ):
+        if not full_runner.can_run_decode(input_ids):
             return self.model.compute_logits(self.model(input_ids, positions))
-
-        num_tokens = input_ids.size(0)
-
-        captured_num_tokens = next(x for x in self.graph_bs if x >= num_tokens)
-        captured_num_seqs = captured_num_tokens // (
-            self.config.block_size * self.config.buffer_size
-        )
-        graph = self.graphs[captured_num_tokens]
-        graph_vars = self.graph_vars
-        graph_capacity = int(graph_vars["context_lens"].size(0))
-        if captured_num_seqs > graph_capacity:
-            raise RuntimeError(
-                "Captured CUDA graph batch size exceeds allocated graph buffer capacity: "
-                f"captured_num_seqs={captured_num_seqs}, graph_capacity={graph_capacity}, "
-                f"captured_num_tokens={captured_num_tokens}, num_tokens={num_tokens}, "
-                f"max_num_reqs={self.config.max_num_reqs}, block_size={self.config.block_size}, "
-                f"buffer_size={self.config.buffer_size}"
-            )
-            
-        num_reqs = attn_metadata.num_reqs
-        self._copy_common_graph_inputs(graph_vars, attn_metadata, input_ids, positions, num_tokens, num_reqs)
-
-        # Graph was captured for `captured_num_seqs` requests; tail cu_seqlens must be
-        # padded so phantom rows have q_len/k_len == 0 (otherwise cu[i+1]==0 gives negative len).
-        for i in range(num_reqs, captured_num_seqs):
-            graph_vars["cu_seqlens_q"][i + 1] = graph_vars["cu_seqlens_q"][i]
-            graph_vars["cu_seqlens_k"][i + 1] = graph_vars["cu_seqlens_k"][i]
-
-        # Update attn_metadata to use graph_vars tensors
-        attn_metadata.slot_mapping = graph_vars["slot_mapping"]
-        attn_metadata.context_lens = graph_vars["context_lens"]
-        attn_metadata.cu_seqlens_q = graph_vars["cu_seqlens_q"]
-        attn_metadata.cu_seqlens_k = graph_vars["cu_seqlens_k"]
-        attn_metadata.valid_slices = graph_vars["valid_slices"]
-        attn_metadata.status_table = graph_vars["status_table"]
-        attn_metadata.prefix_lens = graph_vars["prefix_lens"]
-        attn_metadata.padded_prefix_lens = graph_vars["padded_prefix_lens"]
-        attn_metadata.page_tables = graph_vars["page_tables"]
-
-        graph.replay()
-        return self.model.compute_logits(graph_vars["outputs"][:num_tokens])
+        return full_runner.run_decode(input_ids, positions, attn_metadata)
 
     def run_multi_block(self: ModelRunnerBase, reqs: list[DllmReq]) -> list[int]:
         return self._run_multi_block_subgroup(reqs)
@@ -708,7 +775,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         status_table = torch.zeros(max_num_seqs, dtype=torch.int32, device=device)
         prefix_lens = torch.zeros(max_num_seqs, dtype=torch.int32, device=device)
         padded_prefix_lens = torch.zeros(max_num_seqs, dtype=torch.int32, device=device)
-        outputs = torch.zeros(max_num_tokens, hf_config.hidden_size, device=device)
+        outputs = torch.zeros(max_num_tokens, hf_config.hidden_size, dtype=self._model_hidden_dtype(), device=device)
 
         cu_seqlens_q = torch.zeros(max_num_seqs + 1, dtype=torch.int32, device=device)
         for i in range(max_num_seqs + 1):
