@@ -35,7 +35,7 @@ engine:
 eval:
   dataset_name: "gsm8k_diffulex"
   dataset_split: "test"
-  dataset_limit: 10
+  dataset_limit: 200
   temperature: 0.0
   max_tokens: 1024
   add_bos_token: true

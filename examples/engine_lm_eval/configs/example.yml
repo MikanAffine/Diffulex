@@ -12,7 +12,7 @@ endpoint:
 
 eval:
   dataset_name: "gsm8k_diffulex"
-  dataset_limit: 10
+  dataset_limit: 200
   include_path: null
   dataset_data_files: null
   temperature: 0.0
