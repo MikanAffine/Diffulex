@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from diffulex.attention.metadata import AttnMetaDataBase
+from diffulex.utils.profiler import trace
 
 
 class FullStaticRunner:
@@ -28,6 +29,7 @@ class FullStaticRunner:
         max_graph_tokens = 512 * (self.owner.config.buffer_size * self.owner.config.block_size)
         return int(input_ids.size(0)) <= max_graph_tokens
 
+    @trace
     @torch.inference_mode()
     def run_prefill(
         self,
@@ -37,6 +39,7 @@ class FullStaticRunner:
     ):
         return self.owner._run_prefill_cudagraph(input_ids, positions, attn_metadata)
 
+    @trace
     @torch.inference_mode()
     def run_decode(
         self,

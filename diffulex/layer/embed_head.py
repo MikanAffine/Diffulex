@@ -6,6 +6,7 @@ import torch.distributed as dist
 import os
 
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.utils.profiler import trace
 from diffulex.vllm_compat import get_vllm_tp_group
 
 
@@ -64,6 +65,7 @@ class VocabParallelEmbedding(nn.Module):
         assert param_data.size() == loaded_weight.size()
         param_data.copy_(loaded_weight)
 
+    @trace
     def forward(self, x: torch.Tensor):
         if self.tp_size > 1:
             mask = (x >= self.vocab_start_idx) & (x < self.vocab_end_idx)
@@ -120,6 +122,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             logits.add_(self.bias)
         return logits
 
+    @trace
     def forward(self, x: torch.Tensor):
         logits = self._linear_into_workspace(x)
         if self.tp_size > 1:

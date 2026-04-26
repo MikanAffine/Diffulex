@@ -10,7 +10,12 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from diffulex.config import Config
-from diffulex.distributed.parallel_state import fetch_parallel_state, init_parallel_state, init_process_group, reset_parallel_state
+from diffulex.distributed.parallel_state import (
+    fetch_parallel_state,
+    init_parallel_state,
+    init_process_group,
+    reset_parallel_state,
+)
 from diffulex.sampler.base import merge_sample_outputs
 from diffulex.sampler import AutoSampler
 from diffulex.engine.request import DllmReq
@@ -18,6 +23,7 @@ from diffulex.attention.metadata import set_warming_up, reset_warming_up
 from diffulex.model import AutoModelForDiffusionLM
 from diffulex.engine.strategy_registry import DiffulexStrategyRegistry
 from diffulex.logger import get_logger
+from diffulex.utils.profiler import get_profiler
 from diffulex.vllm_compat import reset_vllm_compat_state, vllm_current_config
 
 
@@ -143,6 +149,10 @@ class ModelRunnerBase(
             torch.cuda.synchronize()
         except Exception:
             logger.debug("CUDA synchronize failed during runner exit on rank %s.", self.rank, exc_info=True)
+        try:
+            get_profiler().stop()
+        except Exception:
+            logger.debug("Profiler stop failed during runner exit on rank %s.", self.rank, exc_info=True)
         try:
             if dist.is_available() and dist.is_initialized():
                 dist.destroy_process_group()

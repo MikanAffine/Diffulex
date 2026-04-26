@@ -22,6 +22,7 @@ from diffulex.moe.layer.naive_impl import NaiveFusedMoE
 from diffulex.moe.topk import GroupLimitedTopKRouter
 from diffulex.distributed.parallel_state import fetch_parallel_state
 from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
+from diffulex.utils.profiler import trace
 
 
 def _llada2_use_reference_view_path() -> bool:
@@ -79,6 +80,7 @@ class LLaDA2QKVParallelLinear(nn.Module):
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         param.data.copy_(self._local_qkv(loaded_weight))
 
+    @trace
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight, self.bias)
 
@@ -150,6 +152,7 @@ class LLaDA2Attention(nn.Module):
         v = rearrange(v, "token (head head_dim) -> token head head_dim", head=self.num_kv_heads)
         return q, k, v
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -196,6 +199,7 @@ class LLaDA2DenseMLP(nn.Module):
             raise NotImplementedError("LLaDA2 dense MLP currently supports only silu.")
         self.act_fn = SiluAndMul()
 
+    @trace
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.down_proj(self.act_fn(torch.cat((self.gate_proj(x), self.up_proj(x)), dim=-1)))
 
@@ -318,6 +322,7 @@ class LLaDA2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.layer_idx = layer_idx
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -356,6 +361,7 @@ class LLaDA2Model(nn.Module):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -514,3 +520,4 @@ __all__ = [
     "LLaDA2TPMoE",
     "LLaDA2EPMoE",
 ]
+

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from diffulex.utils.profiler import trace
+
 """SGLang-style fused top-k draft for Diffulex.
 
 This keeps the contract small:
@@ -300,7 +302,7 @@ def _fused_group_limited_topk(
             weight_ptr = weights_ptr + pid * stride_out_m + topk_idx * stride_out_k
             tl.store(weight_ptr, tl.load(weight_ptr) * ROUTED_SCALING_FACTOR)
 
-
+@trace
 def fused_group_limited_topk(
     router_logits: torch.Tensor,
     expert_bias: torch.Tensor,

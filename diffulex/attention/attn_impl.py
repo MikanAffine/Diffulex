@@ -10,6 +10,7 @@ from diffulex_kernel import (
     chunked_prefill_attn_unified,
 )
 from diffulex.attention.metadata import AttnMetaDataBase
+from diffulex.utils.profiler import trace
 
 
 ATTN_IMPLS = {"naive", "triton"}
@@ -44,6 +45,7 @@ def reference_torch_attention(
     return o.transpose(0, 1).contiguous()
 
 
+@trace
 @torch.compiler.disable
 def triton_attention(
     q: torch.Tensor,
@@ -97,6 +99,7 @@ class Attention(nn.Module):
 
         self.fetch_attn_metadata = fetch_attn_metadata
 
+    @trace
     def forward(
         self,
         q: torch.Tensor,
@@ -151,3 +154,4 @@ class Attention(nn.Module):
 
         # Final reshape
         return rearrange(o, "s nh hd -> s (nh hd)").contiguous()
+

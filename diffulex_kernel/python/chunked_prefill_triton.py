@@ -1,4 +1,5 @@
 import torch
+from diffulex.utils.profiler import trace
 import triton
 import triton.language as tl
 
@@ -334,6 +335,7 @@ def _run_chunked_prefill_attn_unified_kernel(
     return o
 
 
+@trace
 def chunked_prefill_attn_unified(
     q: torch.Tensor,
     k: torch.Tensor,

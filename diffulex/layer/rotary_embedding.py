@@ -4,6 +4,8 @@ import torch.nn as nn
 from functools import lru_cache
 from typing import Any
 
+from diffulex.utils.profiler import trace
+
 
 def apply_rotary_emb(
     x: torch.Tensor,
@@ -37,6 +39,7 @@ class RotaryEmbedding(nn.Module):
         cache = torch.cat((cos, sin), dim=-1)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
+    @trace
     @torch.compile
     def forward(
         self,
@@ -115,6 +118,7 @@ class PartialRotaryEmbedding(nn.Module):
             return torch.cat((x_rot, x_pass), dim=-1)
         raise ValueError(f"Unsupported x ndim for PartialRotaryEmbedding: {x.dim()}")
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,

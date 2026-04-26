@@ -13,6 +13,7 @@ from diffulex.layer.embed_head import VocabParallelEmbedding, ParallelLMHead
 from diffulex.model.auto_model import AutoModelForDiffusionLM
 from diffulex.model.config.sdar.configuration_sdar import SDARConfig
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.utils.profiler import trace
 
 
 if os.environ.get("TRITON_INTERPRET", None) == "1":
@@ -90,6 +91,7 @@ class SDARAttention(nn.Module):
             attn_impl=getattr(config, "attn_impl", "triton"),
         )
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -141,6 +143,7 @@ class SDARMLP(nn.Module):
         assert getattr(config, "hidden_act", "silu") == "silu"
         self.act_fn = SiluAndMul()
 
+    @trace
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = self.gate_proj(x)
         up = self.up_proj(x)
@@ -156,6 +159,7 @@ class SDARDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -182,6 +186,7 @@ class SDARModel(nn.Module):
         self.layers = nn.ModuleList([SDARDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -227,3 +232,4 @@ __all__ = [
     "SDARModel",
     "SDARForDiffusionLM",
 ]
+

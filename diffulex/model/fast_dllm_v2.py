@@ -13,6 +13,7 @@ from diffulex.model.config.fast_dllm_v2.configuration_fast_dllm_v2 import (
     FastdLLMV2Config,
 )
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.utils.profiler import trace
 
 
 if os.environ.get("TRITON_INTERPRET", None) == "1":
@@ -91,6 +92,7 @@ class FastdLLMV2Attention(nn.Module):
             attn_impl=attn_impl,
         )
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -135,6 +137,7 @@ class FastdLLMV2MLP(nn.Module):
         assert hidden_act == "silu"
         self.act_fn = SiluAndMul()
 
+    @trace
     def forward(self, x):
         gate = self.gate_proj(x)
         up = self.up_proj(x)
@@ -171,6 +174,7 @@ class FastdLLMV2DecoderLayer(nn.Module):
         self.input_layernorm = FastdLLMV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = FastdLLMV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -201,6 +205,7 @@ class FastdLLMV2Model(nn.Module):
         self.layers = nn.ModuleList([FastdLLMV2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = FastdLLMV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -246,3 +251,4 @@ class FastdLLMV2ForDiffusionLM(nn.Module):
     ) -> torch.Tensor:
         logits = self.lm_head(hidden_states)
         return logits
+

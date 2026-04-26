@@ -14,6 +14,7 @@ from diffulex.strategy.multi_bd.attention.metadata import (
     set_multi_bd_attn_metadata,
     reset_multi_bd_attn_metadata,
 )
+from diffulex.utils.profiler import trace
 
 
 @AutoModelRunner.register("multi_bd", is_default=True)
@@ -30,19 +31,24 @@ class MultiBDModelRunner(MultiBlockModelRunnerTemplate):
 
         super().__init__(config, rank, event)
 
+    @trace
     def prepare_prefill(self, reqs: list[DllmReq]):
         self.prepare_chunked_prefill_multi_block(reqs)
 
+    @trace
     def prepare_decode(self, reqs: list[DllmReq]):
         self.prepare_decode_multi_block(reqs)
 
+    @trace
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor):
         self.run_model_multi_block(input_ids, positions)
 
+    @trace
     def run(self, reqs: list[DllmReq]) -> list[int]:
         return self.run_multi_block(reqs)
 
+    @trace
     @torch.inference_mode()
     def capture_cudagraph(self):
         self.capture_cudagraph_multi_block()

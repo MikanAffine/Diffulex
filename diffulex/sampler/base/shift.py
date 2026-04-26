@@ -4,6 +4,7 @@ import torch
 
 from diffulex.engine.request import DllmReq
 from diffulex.logger import get_logger
+from diffulex.utils.profiler import trace
 
 from .core import SamplerBase
 from .no_shift import DllmSamplerNoShiftBase
@@ -61,6 +62,7 @@ class SamplerShiftLogits(SamplerBase):
 class DllmSamplerShiftBase(SamplerShiftLogits):
     output_cls = SampleOutputBase
 
+    @trace
     def forward(
         self,
         reqs: list[DllmReq],

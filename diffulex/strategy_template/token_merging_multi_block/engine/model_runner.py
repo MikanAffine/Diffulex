@@ -9,6 +9,7 @@ from diffulex.strategy_template.token_merging_multi_block.attention.metadata imp
 )
 from diffulex.strategy_template.multi_block.engine.model_runner import MultiBlockModelRunnerTemplate
 from diffulex.strategy_template.token_merging_multi_block.engine.request import TokenMergingMultiBlockReqTemplate
+from diffulex.utils.profiler import trace
 
 
 class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
@@ -40,6 +41,7 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
         self._runtime_token_merge_buffers = buffers
         return buffers
 
+    @trace
     def prepare_chunked_prefill_token_merging_multi_block(
         self: TokenMergingMultiBlockModelRunnerTemplate,
         reqs: list[TokenMergingMultiBlockReqTemplate],
@@ -317,12 +319,14 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
             weight=float(self.config.token_merge_weight),
         )
 
+    @trace
     def run_multi_block(
         self: TokenMergingMultiBlockModelRunnerTemplate,
         reqs: list[TokenMergingMultiBlockReqTemplate],
     ) -> list[int]:
         return self._run_token_merging_multi_block_subgroup(reqs)
 
+    @trace
     @torch.inference_mode()
     def run_model_multi_block(
         self: TokenMergingMultiBlockModelRunnerTemplate,
@@ -331,7 +335,6 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
     ):
         attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
         full_runner = self._full_static_runner()
-
         if (attn_metadata.status_table == 0).any():
             if full_runner.can_run_prefill(attn_metadata, int(input_ids.size(0))):
                 return full_runner.run_prefill(input_ids, positions, attn_metadata)
@@ -350,6 +353,7 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
     ) -> None:
         self._bind_graph_token_merge_metadata(attn_metadata, graph_vars, num_tokens)
 
+    @trace
     @torch.inference_mode()
     def capture_cudagraph_token_merging_multi_block(self: TokenMergingMultiBlockModelRunnerTemplate):
         set_warming_up(True)
@@ -464,6 +468,7 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
         )
         reset_warming_up()
 
+    @trace
     def _run_token_merging_multi_block_subgroup(
         self: TokenMergingMultiBlockModelRunnerTemplate,
         reqs: list[TokenMergingMultiBlockReqTemplate],
@@ -472,9 +477,12 @@ class TokenMergingMultiBlockModelRunnerTemplate(MultiBlockModelRunnerTemplate):
         if not local_reqs:
             return self.gather_dp_sample_output(None)
 
+        self._profiler_step()
         input_ids, positions = self.prepare_chunked_prefill_token_merging_multi_block(local_reqs)
         temperatures = self.prepare_sample(local_reqs) if self.is_model_parallel_root else None
-        logits = self.run_model_multi_block(input_ids, positions)
-        sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
+        attn_metadata = self.fetch_attn_metadata()
+        with self._profiler_forward_scope(attn_metadata):
+            logits = self.run_model_multi_block(input_ids, positions)
+            sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
         self.reset_attn_metadata()
         return self.gather_dp_sample_output(sample_output)

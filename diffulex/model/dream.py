@@ -11,6 +11,7 @@ from diffulex.model.config.dream.configuration_dream import DreamConfig
 from diffulex.layer.linear import RowParallelLinear, ColumnParallelLinear
 from diffulex.layer.embed_head import VocabParallelEmbedding, ParallelLMHead
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.utils.profiler import trace
 
 
 if os.environ.get("TRITON_INTERPRET", None) == "1":
@@ -89,6 +90,7 @@ class DreamAttention(nn.Module):
             attn_impl=attn_impl,
         )
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -133,6 +135,7 @@ class DreamMLP(nn.Module):
         assert hidden_act == "silu"
         self.act_fn = SiluAndMul()
 
+    @trace
     def forward(self, x):
         gate = self.gate_proj(x)
         up = self.up_proj(x)
@@ -169,6 +172,7 @@ class DreamDecoderLayer(nn.Module):
         self.input_layernorm = DreamRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = DreamRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -199,6 +203,7 @@ class DreamModel(nn.Module):
         self.layers = nn.ModuleList([DreamDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = DreamRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -244,3 +249,4 @@ class DreamForDiffusionLM(nn.Module):
     ) -> torch.Tensor:
         logits = self.lm_head(hidden_states)
         return logits
+

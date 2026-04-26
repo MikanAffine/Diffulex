@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from diffulex.engine.request import DllmReq
+from diffulex.utils.profiler import trace
 
 from .core import SamplerBase
 from .output import SampleOutputBase
@@ -48,6 +49,7 @@ class DllmSamplerNoShiftBase(SamplerNoShiftLogits):
             )
         return local_ids
 
+    @trace
     def forward(
         self,
         reqs: list[DllmReq],

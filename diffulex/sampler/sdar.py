@@ -2,11 +2,14 @@ import torch
 
 from diffulex.sampler.auto_sampler import AutoSampler
 from diffulex.sampler.base import DllmSamplerNoShiftBase
+from diffulex.utils.profiler import trace
 
 
 @AutoSampler.register("sdar")
 @AutoSampler.register("sdar_moe")
 class SDARSampler(DllmSamplerNoShiftBase):
+    
+    @trace
     def _compute_accepted_ids(
         self,
         block,

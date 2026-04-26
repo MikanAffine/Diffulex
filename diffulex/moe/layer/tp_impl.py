@@ -8,6 +8,7 @@ from diffulex.layer.linear import ReplicatedLinear, divide, tp_all_reduce
 from diffulex.moe.layer.base import FusedMoE
 from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.utils.profiler import trace
 
 
 class TPFusedMoE(FusedMoE):
@@ -61,6 +62,7 @@ class TPFusedMoE(FusedMoE):
             torch.empty(self.num_local_experts, hidden_size, self.intermediate_size)
         )
 
+    @trace
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         original_shape = hidden_states.shape
         flat_hidden_states = hidden_states.reshape(-1, original_shape[-1])
@@ -156,3 +158,4 @@ class TPFusedMoE(FusedMoE):
         return None
 
 __all__ = ["TPFusedMoE"]
+

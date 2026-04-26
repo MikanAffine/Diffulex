@@ -12,6 +12,7 @@ from diffulex.moe.layer.base import FusedMoE
 from diffulex.moe.metadata import DeepEPDispatchMetadata, RouterMetadata
 from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.utils.profiler import trace
 
 
 class EPFusedMoE(FusedMoE):
@@ -125,6 +126,7 @@ class EPFusedMoE(FusedMoE):
         local_hidden_states = flat_hidden_states[local_token_indices]
         return local_hidden_states, local_token_indices, num_tokens
 
+    @trace
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self._forward_token_sharded_a2a(hidden_states)
 
@@ -172,6 +174,7 @@ class EPFusedMoE(FusedMoE):
         final_hidden_states = self.add_shared_experts(final_hidden_states, hidden_states)
         return final_hidden_states, router_logits
 
+    @trace
     def _run_dispatched_experts(self, dispatched, weight_dtype: torch.dtype) -> torch.Tensor:
         dispatch_ctx = dispatched.metadata
         total_recv_slots = int(dispatch_ctx.total_recv_slots)
@@ -271,3 +274,4 @@ class EPFusedMoE(FusedMoE):
 
 
 __all__ = ["EPFusedMoE"]
+

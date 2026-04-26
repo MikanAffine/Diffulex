@@ -6,6 +6,7 @@ import torch.nn as nn
 from diffulex.layer.linear import ReplicatedLinear
 from diffulex.moe.layer.base import FusedMoE
 from diffulex.utils.checkpoint import LoadContext, ResolvedWeight
+from diffulex.utils.profiler import trace
 
 
 class NaiveFusedMoE(FusedMoE):
@@ -46,6 +47,7 @@ class NaiveFusedMoE(FusedMoE):
             torch.empty(self.num_experts, hidden_size, self.intermediate_size)
         )
 
+    @trace
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         original_shape = hidden_states.shape
         flat_hidden_states = hidden_states.reshape(-1, original_shape[-1])
@@ -113,3 +115,4 @@ class NaiveFusedMoE(FusedMoE):
         return None
 
 __all__ = ["NaiveFusedMoE"]
+

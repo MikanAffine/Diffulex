@@ -7,9 +7,12 @@ import torch.nn.functional as F
 from diffulex.mixin import EditSamplerMixin, TokenMergeSamplerMixin
 from diffulex.sampler.auto_sampler import AutoSampler
 from diffulex.sampler.base import DllmSamplerNoShiftBase
+from diffulex.utils.profiler import trace
 
 
 class LLaDA2AcceptedIdsMixin:
+    
+    @trace
     def _compute_accepted_ids(
         self,
         block,

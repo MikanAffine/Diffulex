@@ -1,4 +1,5 @@
 import torch
+from diffulex.utils.profiler import trace
 import triton
 
 import triton.language as tl
@@ -107,7 +108,7 @@ def dllm_store_kv_cache_kernel_distinct(
     tl.store(k_cache_ptr + k_cache_offs, k)
     tl.store(v_cache_ptr + v_cache_offs, v)
 
-
+@trace
 def store_kv_cache_distinct(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -142,7 +143,7 @@ def store_kv_cache_distinct(
         HDim * NHeads,
     )
 
-
+@trace
 def store_kv_cache_unified(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -422,7 +423,7 @@ def load_kv_cache_kernel_distinct(
             tl.store(k_out_ptr + offs_cur_kv_new_to_out, k_new)
             tl.store(v_out_ptr + offs_cur_kv_new_to_out, v_new)
 
-
+@trace
 def load_kv_cache(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
@@ -548,7 +549,7 @@ def load_kv_cache(
 
     return k_output, v_output
 
-
+@trace
 def store_kv_cache_unified_layout(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -576,7 +577,7 @@ def store_kv_cache_unified_layout(
 
     store_kv_cache_unified(key, value, k_cache, v_cache, slot_mapping)
 
-
+@trace
 def store_kv_cache_distinct_layout(
     key: torch.Tensor,
     value: torch.Tensor,

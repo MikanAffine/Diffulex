@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from diffulex.attention.metadata import (
     AttnMetaDataBase,
+    is_warming_up,
     set_warming_up,
     reset_warming_up,
 )
@@ -19,6 +20,7 @@ from diffulex.engine.status import DllmReqStatus
 from diffulex.engine.model_runner import ModelRunnerBase
 from diffulex.logger import get_logger
 from diffulex.strategy_template.multi_block.engine.full_static_runner import FullStaticRunner
+from diffulex.utils.profiler import get_profiler, trace, trace_phase_from_attn_metadata, trace_phase_scope
 from diffulex.vllm_compat import vllm_graph_capture
 
 logger = get_logger(__name__)
@@ -44,10 +46,32 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
             self.full_static_runner = runner
         return runner
 
+    def _profiler_worker_name(self) -> str:
+        return f"rank-{self.rank}"
+
+    @contextmanager
+    def _profiler_forward_scope(self, attn_metadata: AttnMetaDataBase | None):
+        profiler = get_profiler()
+        should_profile = not is_warming_up()
+        if should_profile and not profiler.is_active:
+            profiler.start_if_enabled(worker_name=self._profiler_worker_name())
+        phase = trace_phase_from_attn_metadata(attn_metadata) if attn_metadata is not None else None
+        with trace_phase_scope(phase if should_profile else None):
+            yield
+
+    def _profiler_step(self) -> None:
+        profiler = get_profiler()
+        should_profile = not is_warming_up()
+        if should_profile and not profiler.is_active:
+            profiler.start_if_enabled(worker_name=self._profiler_worker_name())
+        if should_profile:
+            profiler.step()
+
     @staticmethod
     def _round_up_to_multiple(value: int, multiple: int) -> int:
         return ((value + multiple - 1) // multiple) * multiple
 
+    @trace
     def _prefill_warmup(self):
         logger.info("Warming up prefill...")
 
@@ -135,6 +159,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
             logger.debug("Distributed barrier failed before CUDA graph capture on rank %s.", self.rank, exc_info=True)
             raise
 
+    @trace
     def _capture_model_forward_graph(
         self,
         input_ids: torch.Tensor,
@@ -175,6 +200,83 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
                     run_once()
             stream.synchronize()
         return graph
+
+    @trace
+    @torch.inference_mode()
+    def _capture_prefill_cudagraph(self, bucket_len: int):
+        if not hasattr(self, "prefill_graphs"):
+            self.prefill_graphs = {}
+        if bucket_len in self.prefill_graphs:
+            return self.prefill_graphs[bucket_len]
+
+        config = self.config
+        hf_config = config.hf_config
+        req_capacity = self._prefill_graph_req_capacity()
+        max_num_pages = (max(config.max_model_len, bucket_len) + self.page_size - 1) // self.page_size
+        device = self._cuda_graph_device()
+
+        input_ids = torch.zeros(bucket_len, dtype=torch.int64, device=device)
+        positions = torch.zeros(bucket_len, dtype=torch.int64, device=device)
+        slot_mapping = torch.full((bucket_len,), -1, dtype=torch.int32, device=device)
+        context_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
+        page_tables = torch.full((req_capacity, max_num_pages), -1, dtype=torch.int32, device=device)
+        valid_slices = torch.zeros(req_capacity, dtype=torch.int32, device=device)
+        status_table = torch.zeros(req_capacity, dtype=torch.int32, device=device)
+        prefix_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
+        padded_prefix_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
+        outputs = torch.zeros(bucket_len, hf_config.hidden_size, dtype=self._model_hidden_dtype(), device=device)
+
+        cu_seqlens = torch.full((req_capacity + 1,), bucket_len, dtype=torch.int32, device=device)
+        cu_seqlens[0] = 0
+        valid_slices[0] = bucket_len
+
+        self.set_attn_metadata(
+            is_prefill=[True] * req_capacity,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=bucket_len,
+            max_seqlen_k=bucket_len,
+            page_size=config.kv_cache_page_size,
+            page_tables=page_tables,
+            block_size=self.block_size,
+            kv_cache_layout=config.kv_cache_layout,
+        )
+        attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
+        attn_metadata.init_multi_block(
+            valid_slices=valid_slices,
+            buffer_size=config.buffer_size,
+            is_prefix_full=self.is_prefix_full,
+            status_table=status_table,
+            prefix_lens=prefix_lens,
+            padded_prefix_lens=padded_prefix_lens,
+        )
+        graph_vars = dict(
+            input_ids=input_ids,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            page_tables=page_tables,
+            valid_slices=valid_slices,
+            status_table=status_table,
+            prefix_lens=prefix_lens,
+            padded_prefix_lens=padded_prefix_lens,
+            outputs=outputs,
+        )
+        graph_vars.update(self._prefill_graph_extra_vars(bucket_len, device))
+        self._init_prefill_graph_extra_metadata(attn_metadata, graph_vars, bucket_len)
+
+        graph = self._capture_model_forward_graph(input_ids, positions, outputs, bucket_len)
+        if self.graph_pool is None:
+            self.graph_pool = graph.pool()
+        torch.cuda.synchronize()
+        self.reset_attn_metadata()
+
+        self.prefill_graphs[bucket_len] = (graph, graph_vars, req_capacity)
+        return self.prefill_graphs[bucket_len]
 
     @staticmethod
     def _graph_seq_batch_sizes(max_num_seqs: int) -> list[int]:
@@ -366,12 +468,14 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         return buffers
 
     @staticmethod
+    @trace
     def _cpu_tensor(values, dtype: torch.dtype) -> torch.Tensor:
         tensor = torch.tensor(values, dtype=dtype, device="cpu")
         if tensor.numel() > 0 and torch.cuda.is_available():
             tensor = tensor.pin_memory()
         return tensor
 
+    @trace
     def _copy_1d_to_runtime_static(
         self,
         buffers: dict[str, torch.Tensor],
@@ -385,6 +489,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
             dst.copy_(self._cpu_tensor(values, dtype), non_blocking=True)
         return dst
 
+    @trace
     def _prepare_static_page_tables(
         self,
         buffers: dict[str, torch.Tensor],
@@ -400,6 +505,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         page_tables.copy_(self._cpu_tensor(rows, torch.int32), non_blocking=True)
         return page_tables
 
+    @trace
     def _can_use_prefill_graph(self, attn_metadata: AttnMetaDataBase, num_tokens: int) -> bool:
         if self.enforce_eager or not bool(getattr(self.config, "enable_prefill_cudagraph", True)):
             return False
@@ -427,6 +533,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
     def _prefill_graph_extra_vars(self, bucket_len: int, device: torch.device) -> dict[str, torch.Tensor]:
         return {}
 
+    @trace
     def _bind_prefill_graph_extra_metadata(
         self,
         attn_metadata: AttnMetaDataBase,
@@ -437,6 +544,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
     ) -> None:
         return None
 
+    @trace
     def _bind_decode_graph_extra_metadata(
         self,
         attn_metadata: AttnMetaDataBase,
@@ -445,6 +553,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
     ) -> None:
         return None
 
+    @trace
     def _set_replay_prefill_graph_metadata(
         self,
         graph_vars: dict[str, torch.Tensor],
@@ -475,82 +584,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         )
         return attn_metadata
 
-    @torch.inference_mode()
-    def _capture_prefill_cudagraph(self, bucket_len: int):
-        if not hasattr(self, "prefill_graphs"):
-            self.prefill_graphs = {}
-        if bucket_len in self.prefill_graphs:
-            return self.prefill_graphs[bucket_len]
-
-        config = self.config
-        hf_config = config.hf_config
-        req_capacity = self._prefill_graph_req_capacity()
-        max_num_pages = (max(config.max_model_len, bucket_len) + self.page_size - 1) // self.page_size
-        device = self._cuda_graph_device()
-
-        input_ids = torch.zeros(bucket_len, dtype=torch.int64, device=device)
-        positions = torch.zeros(bucket_len, dtype=torch.int64, device=device)
-        slot_mapping = torch.full((bucket_len,), -1, dtype=torch.int32, device=device)
-        context_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
-        page_tables = torch.full((req_capacity, max_num_pages), -1, dtype=torch.int32, device=device)
-        valid_slices = torch.zeros(req_capacity, dtype=torch.int32, device=device)
-        status_table = torch.zeros(req_capacity, dtype=torch.int32, device=device)
-        prefix_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
-        padded_prefix_lens = torch.zeros(req_capacity, dtype=torch.int32, device=device)
-        outputs = torch.zeros(bucket_len, hf_config.hidden_size, dtype=self._model_hidden_dtype(), device=device)
-
-        cu_seqlens = torch.full((req_capacity + 1,), bucket_len, dtype=torch.int32, device=device)
-        cu_seqlens[0] = 0
-        valid_slices[0] = bucket_len
-
-        self.set_attn_metadata(
-            is_prefill=[True] * req_capacity,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=bucket_len,
-            max_seqlen_k=bucket_len,
-            page_size=config.kv_cache_page_size,
-            page_tables=page_tables,
-            block_size=self.block_size,
-            kv_cache_layout=config.kv_cache_layout,
-        )
-        attn_metadata: AttnMetaDataBase = self.fetch_attn_metadata()
-        attn_metadata.init_multi_block(
-            valid_slices=valid_slices,
-            buffer_size=config.buffer_size,
-            is_prefix_full=self.is_prefix_full,
-            status_table=status_table,
-            prefix_lens=prefix_lens,
-            padded_prefix_lens=padded_prefix_lens,
-        )
-        graph_vars = dict(
-            input_ids=input_ids,
-            positions=positions,
-            slot_mapping=slot_mapping,
-            context_lens=context_lens,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            page_tables=page_tables,
-            valid_slices=valid_slices,
-            status_table=status_table,
-            prefix_lens=prefix_lens,
-            padded_prefix_lens=padded_prefix_lens,
-            outputs=outputs,
-        )
-        graph_vars.update(self._prefill_graph_extra_vars(bucket_len, device))
-        self._init_prefill_graph_extra_metadata(attn_metadata, graph_vars, bucket_len)
-
-        graph = self._capture_model_forward_graph(input_ids, positions, outputs, bucket_len)
-        if self.graph_pool is None:
-            self.graph_pool = graph.pool()
-        torch.cuda.synchronize()
-        self.reset_attn_metadata()
-
-        self.prefill_graphs[bucket_len] = (graph, graph_vars, req_capacity)
-        return self.prefill_graphs[bucket_len]
-
+    @trace
     def _copy_common_graph_inputs(
         self,
         graph_vars: dict[str, torch.Tensor],
@@ -584,6 +618,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
             graph_vars["page_tables"][:, pt_w:].fill_(-1)
 
     @torch.inference_mode()
+    @trace
     def _run_prefill_cudagraph(
         self,
         input_ids: torch.Tensor,
@@ -621,6 +656,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         graph.replay()
         return self.model.compute_logits(graph_vars["outputs"][:num_tokens])
 
+    @trace
     def prepare_chunked_prefill_multi_block(self: ModelRunnerBase, reqs: list[DllmReq]):
         input_ids: list[int] = []
         positions: list[int] = []
@@ -705,6 +741,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         )
         return input_ids_tensor, positions_tensor
 
+    @trace
     def prepare_idle_multi_block(self: ModelRunnerBase):
         buffers = self._ensure_runtime_static_buffers(token_capacity=1, req_capacity=1, page_capacity=1)
         input_ids_tensor = buffers["input_ids"][:0]
@@ -738,6 +775,7 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
         )
         return input_ids_tensor, positions_tensor
 
+    @trace
     @torch.inference_mode()
     def run_idle_multi_block(
         self: ModelRunnerBase,
@@ -746,8 +784,12 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
     ) -> None:
         # Idle ranks must enter model forward so EP dispatch/combine collectives
         # see all participants, but they have no local logits to sample.
-        _ = self.model(input_ids, positions)
+        self._profiler_step()
+        attn_metadata = self.fetch_attn_metadata()
+        with self._profiler_forward_scope(attn_metadata):
+            _ = self.model(input_ids, positions)
 
+    @trace
     @torch.inference_mode()
     def run_model_multi_block(
         self: ModelRunnerBase,
@@ -766,9 +808,11 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
             return self.model.compute_logits(self.model(input_ids, positions))
         return full_runner.run_decode(input_ids, positions, attn_metadata)
 
+    @trace
     def run_multi_block(self: ModelRunnerBase, reqs: list[DllmReq]) -> list[int]:
         return self._run_multi_block_subgroup(reqs)
 
+    @trace
     def _run_multi_block_subgroup(self: ModelRunnerBase, reqs: list[DllmReq]):
         local_reqs = self.filter_local_reqs(reqs)
         if not local_reqs:
@@ -778,13 +822,17 @@ class MultiBlockModelRunnerTemplate(ModelRunnerBase):
                 self.reset_attn_metadata()
             return self.gather_dp_sample_output(None)
 
+        self._profiler_step()
         input_ids, positions = self.prepare_chunked_prefill_multi_block(local_reqs)
         temperatures = self.prepare_sample(local_reqs) if self.is_model_parallel_root else None
-        logits = self.run_model_multi_block(input_ids, positions)
-        sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
+        attn_metadata = self.fetch_attn_metadata()
+        with self._profiler_forward_scope(attn_metadata):
+            logits = self.run_model_multi_block(input_ids, positions)
+            sample_output = self.sampler(local_reqs, logits, temperatures) if self.is_model_parallel_root else None
         self.reset_attn_metadata()
         return self.gather_dp_sample_output(sample_output)
 
+    @trace
     @torch.inference_mode()
     def capture_cudagraph_multi_block(self: ModelRunnerBase):
         set_warming_up(True)

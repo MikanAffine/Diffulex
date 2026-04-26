@@ -2,10 +2,13 @@ import torch
 
 from diffulex.sampler.auto_sampler import AutoSampler
 from diffulex.sampler.base import DllmSamplerShiftBase
+from diffulex.utils.profiler import trace
 
 
 @AutoSampler.register("fast_dllm_v2")
 class FastdLLMV2Sampler(DllmSamplerShiftBase):
+
+    @trace
     def _compute_accepted_ids(
         self,
         block,

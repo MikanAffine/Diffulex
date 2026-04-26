@@ -8,6 +8,7 @@ from diffulex.layer.layernorm import RMSNorm
 from diffulex.model.auto_model import AutoModelForDiffusionLM
 from diffulex.model.sdar import SDARAttention, SDARMLP
 from diffulex.moe import build_mlp_or_moe
+from diffulex.utils.profiler import trace
 
 
 class SDARMoEDecoderLayer(nn.Module):
@@ -20,6 +21,7 @@ class SDARMoEDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         positions: torch.Tensor,
@@ -53,6 +55,7 @@ class SDARMoEModel(nn.Module):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    @trace
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -95,3 +98,4 @@ __all__ = [
     "SDARMoEModel",
     "SDARMoEForDiffusionLM",
 ]
+

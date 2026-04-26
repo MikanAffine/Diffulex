@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from diffulex.distributed.parallel_state import fetch_parallel_state
+from diffulex.utils.profiler import trace
 from diffulex.vllm_compat import get_vllm_tp_group
 
 
@@ -122,6 +123,7 @@ class ReplicatedLinear(LinearBase, LoRAMixin):
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param.data.copy_(loaded_weight)
 
+    @trace
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self._forward_base(x, self.bias)
         return self.lora_forward(x, base_out)
@@ -159,6 +161,7 @@ class ColumnParallelLinear(LinearBase, LoRAMixin):
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
         param_data.copy_(loaded_weight)
 
+    @trace
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self._forward_base(x, self.bias)
         return self.lora_forward(x, base_out)
@@ -271,6 +274,7 @@ class RowParallelLinear(LinearBase, LoRAMixin):
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
         param_data.copy_(loaded_weight)
 
+    @trace
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if self.tp_rank == 0 else None
         tp_group = self.tp_group

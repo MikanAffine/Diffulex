@@ -3,6 +3,8 @@ import os
 import torch
 import torch.nn as nn
 
+from diffulex.utils.profiler import trace
+
 
 def _use_reference_rmsnorm() -> bool:
     return os.getenv("DIFFULEX_REFERENCE_RMSNORM", "0") == "1"
@@ -67,6 +69,7 @@ class RMSNorm(nn.Module):
         x_fp32 = x_fp32 * torch.rsqrt(var + self.eps)
         return x_fp32.to(orig_dtype) * self.weight, residual_out
 
+    @trace
     def forward(
         self,
         x: torch.Tensor,

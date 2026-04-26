@@ -7,6 +7,7 @@ import glob
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
+from diffulex.utils.profiler import trace
 import triton
 import triton.language as tl
 
@@ -1365,6 +1366,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     return out_hidden_states
 
 
+@trace
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,

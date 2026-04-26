@@ -3,11 +3,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diffulex.utils.profiler import trace
+
 
 class SiluAndMul(nn.Module):
     def __init__(self):
         super().__init__()
 
+    @trace
     @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, y = x.chunk(2, -1)

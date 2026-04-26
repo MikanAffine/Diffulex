@@ -15,6 +15,7 @@ from diffulex.moe.topk import build_topk_router
 from diffulex_kernel import fused_moe
 from diffulex.layer.activation import SiluAndMul
 from diffulex.layer.linear import ColumnParallelLinear, RowParallelLinear
+from diffulex.utils.profiler import trace
 
 _VLLM_FUSED_MOE = None
 _VLLM_FUSED_MOE_LOAD_ERR: Exception | None = None
@@ -52,6 +53,7 @@ class SharedExpertMLP(nn.Module):
         self.down_proj = RowParallelLinear(intermediate_size, hidden_size, bias=False)
         self.act_fn = SiluAndMul()
 
+    @trace
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.down_proj(
             self.act_fn(torch.cat((self.gate_proj(hidden_states), self.up_proj(hidden_states)), dim=-1))
@@ -179,6 +181,7 @@ class FusedMoE(nn.Module, ABC):
         except TypeError:
             return self._phase_from_prefill_flags(int(status_table) == 0)
 
+    @trace
     @torch.compiler.disable
     def expert_gemm(
         self,
