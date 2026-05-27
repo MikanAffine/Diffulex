@@ -21,9 +21,11 @@ if TYPE_CHECKING:
 
 def __getattr__(name: str):
     if name in ("dllm_chunked_prefill", "chunked_prefill_attn_unified"):
-        from diffulex_kernel.python.chunked_prefill_triton import (
-            chunked_prefill_attn_unified,
-        )
+        #from diffulex_kernel.python.chunked_prefill_triton import (
+        #    chunked_prefill_attn_unified,
+        #)
+        from diffulex_kernel.python.chunked_prefill_triton_new import chunked_prefill_attn_unified
+        
         return chunked_prefill_attn_unified
 
     if name == "store_kv_cache_unified_layout":
